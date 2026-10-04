@@ -17,6 +17,7 @@ metadata:
 |---|---|
 | Does this code belong in polytag, zodal-groups or zodal? | ADR 0001, the placement table |
 | What are the v1 seams and their defaults? | ADR 0001, "v1 seams" |
+| What changed after reading the zodal ecosystem's own research? | ADR 0001 §Revision 1 |
 | Format vs grammar; which grammars exist; the codec interfaces | `formats-and-grammars.md` §0, §3, §8.1 |
 | Which grammar is lossless for which profile? | `formats-and-grammars.md` §4 (the two tables) |
 | Default grammar per format / per profile; v1 vs v1.1 vs v2 | `formats-and-grammars.md` §8.4–§8.6 |
@@ -36,6 +37,10 @@ metadata:
 ## Settled — reopen only with new evidence
 
 - polytag is the composition tier (depends on both storage and UI sides); library pieces that depend on one side go upstream.
+- **Operations are acture-shaped commands; undo is the app's history over returned inverses.** No `CommandSet`/`UndoStack` in polytag, no `handler` on `OperationDefinition` (ADR 0001 §Revision 1).
+- **A tagged collection has one or more group spaces** (`spaces`), each with its own profile and `edges`.
+- **Bulk writes keep what succeeded** and report failures; within one item, record + edges succeed together.
+- **Tag-agnostic subpaths** (`polytag/formats`, `/backends`, `/views`) never import `@zodal/groups-*`.
 - Memberships default to **embedded** (`groups` id array on the item record); `GroupStore` is the opt-in for group-to-group edges, edge order and labels at scale.
 - Import default = the shape people already have; export default = the lossless grammar for the dataset's profile, with its loss report shown.
 - A board over a non-exclusive tag family needs an explicit `multiValue` policy.

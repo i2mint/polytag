@@ -17,14 +17,16 @@
 
 | Component | What it gives polytag | Status |
 |---|---|---|
-| [zodal](https://github.com/i2mint/zodal) `@zodal/core` / `store` / `ui` 0.2.0 | Zod schema → affordances; `DataProvider<T>` with honest `getCapabilities()`; `filterToFunction` incl. `arrayContainsAny`; field-level generators (`toColumnDefs`, `toFormConfig`, `toFilterConfig`); tester + `PRIORITY` renderer registry; `CollectionAffordances.views` declared but unused ([zodal#14](https://github.com/i2mint/zodal/issues/14), [zodal#15](https://github.com/i2mint/zodal/issues/15)) | published |
+| [zodal](https://github.com/i2mint/zodal) `@zodal/core` / `store` / `ui` 0.2.0 | Zod schema → affordances; `DataProvider<T>` with honest `getCapabilities()`; `filterToFunction` incl. `arrayContainsAny`; field-level generators (`toColumnDefs`, `toFormConfig`, `toFilterConfig`); tester + `PRIORITY` renderer registry; `CollectionAffordances.views` declared but unused ([zodal#14](https://github.com/i2mint/zodal/issues/14), [zodal#15](https://github.com/i2mint/zodal/issues/15)); content-metadata bifurcation (`createBifurcatedProvider`, `ContentRef`, `storageRole`); `Codec` + `composeCodecs` (core) and `wrapProvider` (store); `import`/`export` collection affordances (declared, unimplemented) | published |
 | `zodal-store-*` (in-memory, fs, localStorage, http, S3, Supabase) | the backend menu's entries; DI of clients; no registry; no IndexedDB metadata provider | published, peer-range hygiene needed [2 §1] |
 | `zodal-ui-vanilla`, `zodal-ui-shadcn` | field renderers (cell/form/filter/content); no tag chips, no view-level renderers; shadcn is plain HTML for now | published |
 | [zodal-groups](https://github.com/i2mint/zodal-groups) `groups-core` / `groups-ui` / `groups-ui-vanilla` 0.1.0 | the model and its projections; `scopeFilter()` (the only bridge to collections); tree, Miller columns, breadcrumbs, facets, tag input renderers; drag intent with ADD as default | published; store adapters and shadcn/Ark renderers TODO |
 | [zodal-dials](https://github.com/i2mint/zodal-dials) | proof that "facets canonical, tree a projection" works; a renderer registry that specialises `@zodal/ui` (the reuse-correct precedent); format-preserving JSONC store; the codec research polytag's grammars build on | published |
-| [zodal-graphs](https://github.com/i2mint/zodal-graphs) | the most mature *view menu* in the ecosystem (`availableViews`, capability-ranked selection with a degrade report): the pattern to copy for collection views | not yet on npm |
+| [zodal-graphs](https://github.com/i2mint/zodal-graphs) | the view-switch model (one `activeView` field on `CollectionState`; selection and filters shared across lenses, its reconciliation P5) and a rank-and-degrade renderer registry (`graph-ui`: `select`, `explain`, `CapabilityGap`); its `availableViews` only returns the declared list | not yet on npm |
 
-The ecosystem has three registry dialects (`@zodal/ui`, `groups-ui`, `graph-ui`); polytag uses `@zodal/ui`'s, as `zodal-dials` does [2 §3.5].
+The ecosystem has three registry dialects (`@zodal/ui`, `groups-ui`, `graph-ui`); `@zodal/ui`'s is field-level and cannot rank collection views as it stands, so polytag asks upstream for one generic ranked registry ([zodal#17](https://github.com/i2mint/zodal/issues/17)) [2 §3.5].
+
+**Fleet decisions polytag adopts rather than re-decides** [7]: user actions are commands declared once, with undo as a projection of the command registry ([acture](https://github.com/thorwhalen/acture)); a bulk write keeps what succeeded and reports what failed; working view state autosaves while saved views are named snapshots ([comparanda](https://github.com/thorwhalen/comparanda) ADR-0006/0007); share links use [holdall](https://github.com/i2mint/holdall)'s versioned fragment envelope.
 
 ## 2. Terminology
 
@@ -70,15 +72,16 @@ Four planned consumers, chosen because they span the profiles and the backends. 
 
 | Case | Data today | Profile | Backend | Default view |
 |---|---|---|---|---|
-| [annals](https://github.com/thorwhalen/annals): agent-written documents for review | flat `docs/<id>/meta.json` with `tags`; groups as ordered id lists; a bin folder; plain files, rsync-written, no index | `labels` | http over the app's own endpoint (reads the files the agents write; no index as a second source of truth) | three-pane, triage of untagged |
-| [citeget](https://github.com/thorwhalen/citeget): acquired references | per-run folders of PDFs plus markdown indexes; no tags; a reference cited by two reports is downloaded twice | `polyhierarchy` (topics) | fs (Node) with sidecar metadata | faceted browse |
+| [annals](https://github.com/thorwhalen/annals): agent-written documents for review | flat `docs/<id>/meta.json` with `tags`; groups as ordered id lists; a bin folder; plain files, rsync-written, no index | two spaces: `tags` (`flatTags`) + ordered `groups` | http over the app's own endpoint (reads the files the agents write; no index as a second source of truth) | three-pane, triage of untagged |
+| [citeget](https://github.com/thorwhalen/citeget): acquired references | per-run folders of PDFs plus markdown indexes; no tags; a reference cited by two reports is downloaded twice | two spaces: `topics` (`polyhierarchy`) + `sources` (`filesystem`) | fs (Node): metadata sidecars × PDF content | faceted browse |
 | A media studio's asset library (private consumer) | flat, content-addressed artifacts; no organise operations at all | `flatTags` → `labels` | http | gallery with chips |
 | A file-browser app (private consumer) | real per-user folders; list/stat/download/mkdir only | `filesystem`, then `labels` | http over a sandboxed file store | two-pane file manager + Miller columns |
 
 ## 6. Open questions
 
 - Where the format codecs ultimately live. They are generic (any zodal collection could import CSV), and zodal-dials plans TOML/YAML stores, so they are an extraction candidate for a `zodal` package once a second consumer exists. v1 keeps them in polytag behind the registry seam.
-- Whether operation handlers belong in `@zodal/core`. `OperationDefinition` has no executor today; polytag needs tagging operations bound to the facade. Proposed upstream as an optional `handler`, not decided.
+- ~~Whether operation handlers belong in `@zodal/core`.~~ Settled by the fleet: operations are acture-shaped commands; `OperationDefinition` stays declarative (revised the same day; [zodal#18](https://github.com/i2mint/zodal/issues/18)).
+- zodal's workspace guide cites an "approved architecture plan" that exists nowhere; zodal's own open questions on command objects and on where codecs live are treated as open and settled here (commands as above; formats typed as zodal's `Codec`, in `polytag/formats`).
 - A Python sibling (the PyPI name is free): three of the four acceptance cases have Python servers over plain files. A server-side membership store over files and sidecars that speaks `zodal-store-http`'s contract would serve them all. Not v1; tracked as an idea.
 - Tombstones: `EdgeDelta` never removes nodes, so undoing a tag delete or merge needs a tombstone (raise in zodal-groups).
 
@@ -90,3 +93,4 @@ Four planned consumers, chosen because they span the profiles and the backends. 
 4. [UI patterns for CRUD over tagged collections, and the affordance/rendering split](ui-patterns.md).
 5. [Data formats and grammars for flat + structure data](formats-and-grammars.md).
 6. [Prior art — libraries and products](prior-art.md).
+7. Review of the zodal ecosystem's own research against this plan, 2026-10-04 (maintainers' working notes; 14 changes and 3 conflicts, applied to [ADR 0001](../decisions/0001-placement-and-seams.md) §Revision 1 and the issues).

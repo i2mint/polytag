@@ -209,7 +209,9 @@ This needs *field roles* in schema metadata (`title`, `cover`, `date`, `body`, `
 
 Resolution reuses the existing machinery: a `RendererContext` carrying `{surface: 'itemLayout', layout.kind, profile, roles}`, testers return scores, `explain()` answers "why did I get that renderer?" [14]. The new `Surface` values: `shell`, `itemLayout`, `bulkTagMenu`, `tagManager`, `inspector`, `triage`, `commandPalette`.
 
-### 3.5 Headless affordance objects (the vocabulary a renderer must consume)
+### 3.5 Headless affordance objects
+
+> **Superseded in part (2026-10-04):** the `CommandSet` and `UndoStack` objects below are not built by polytag. The fleet already decided that user actions are commands declared once (acture's `CommandRecord`) and that undo is the app's history over the commands' returned inverses. See [ADR 0001 §Revision 1](../decisions/0001-placement-and-seams.md). (the vocabulary a renderer must consume)
 
 Each object is `{state, derived data, commands, capabilities, a11y}`. The core computes it; the renderer draws it. Existing objects are marked.
 

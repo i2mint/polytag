@@ -11,6 +11,10 @@
 3. **The zodal-groups vocabulary (node, edge, kind, profile, membership, projection, PathNode) is consistent with established usage**, with three collisions worth resolving: `taxonomy` (a WordPress "taxonomy" is a whole vocabulary, not a hierarchy) [16], `label` (Gmail label, Kubernetes label and Neo4j label mean three different things) [17, 18, 19], and `collection` (already taken by zodal's own CRUD collection; Zotero, Presto and Are.na use it for a group) [8, 20]. See section 3.3.
 4. **The empirical literature mostly disconfirms "tags beat folders" as a user-behaviour claim**, and even where it is mixed it supports a folder-like default view with multi-membership revealed progressively [7, 21, 22, 23, 24]. See section 4. Caveat: nearly all of those studies concern personal files and email, not application data managed through a CRUD library, so transfer to our use cases is an inference.
 
+## 0.1 Addendum (2026-10-04): "view"
+
+"View" has three meanings in the zodal/acture fleet. In polytag: a **view** is a layout configuration (`ViewConfig`: shell, navigator, layout, inspector, interaction), a lens over shared state; a **saved view** adds a name, filter, sort, group and scope. Neither is acture's `ViewRecord` (a named selector over state exposed to agents), which a polytag app would also register (selection, scope).
+
 ## 1. Glossary
 
 Column "API?" means: **yes** = canonical term in our API and docs; **alias** = documented synonym or a UI "skin" word, not a type name; **docs** = used in prose only; **no** = avoid in the API (reason given).
