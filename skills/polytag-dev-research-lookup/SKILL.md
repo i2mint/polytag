@@ -1,0 +1,42 @@
+---
+name: polytag-dev-research-lookup
+description: Use when you need to find WHICH polytag research document answers a question, or what was already decided, before reading or re-litigating it. Triggers on "what did we decide for polytag", "where does this piece go (polytag or zodal-groups or zodal)", "which grammar is lossless", "what is a grammar vs a format", "what goes in ViewConfig", "which views are in the menu", "what do we call X", "is there prior art for", "why embedded edges by default", "what are the acceptance cases". Points at the one right document; the model's own decisions live in zodal-groups.
+metadata:
+  audience: developers
+---
+
+# polytag · research lookup
+
+**Read first: [`docs/research/synthesis.md`](../../docs/research/synthesis.md)** (one page), then [`docs/decisions/0001-placement-and-seams.md`](../../docs/decisions/0001-placement-and-seams.md) (where each piece lives, the five v1 seams).
+
+**The model is not decided here.** Membership edges, profiles, closure, `PathNode[]`, drag = add, de-duplicated counts: zodal-groups decisions D1–D24 in its `docs/research/_reconciliation.md` (sibling repo `../zodal-groups`, or <https://github.com/i2mint/zodal-groups>). Do not re-litigate them from polytag.
+
+## Route by question
+
+| Question | Go to |
+|---|---|
+| Does this code belong in polytag, zodal-groups or zodal? | ADR 0001, the placement table |
+| What are the v1 seams and their defaults? | ADR 0001, "v1 seams" |
+| Format vs grammar; which grammars exist; the codec interfaces | `formats-and-grammars.md` §0, §3, §8.1 |
+| Which grammar is lossless for which profile? | `formats-and-grammars.md` §4 (the two tables) |
+| Default grammar per format / per profile; v1 vs v1.1 vs v2 | `formats-and-grammars.md` §8.4–§8.6 |
+| YAML/TOML/CSV traps (`010`, alias limits, key order) | `formats-and-grammars.md` §0.4, §5 |
+| The `ViewConfig` shape | `ui-patterns.md` §3.3 |
+| Which views are offered for a schema (applicability testers) | `ui-patterns.md` §3.4 |
+| The ranked default view menu | `ui-patterns.md` §4.1 |
+| What every view must support (the 12-point contract) | `ui-patterns.md` §4.2 |
+| Bulk tagging (tri-state), violation messages | `ui-patterns.md` §2.2, §2.3 |
+| Kanban over a multi-valued tag family | `ui-patterns.md` §0.3; `prior-art.md` §3.6 |
+| What to call things (item, group, membership, facet, smart group…) | `terminology.md` §3.2 |
+| Do users prefer folders or tags? (the default view) | `terminology.md` §4 |
+| A library or product: licence, verdict | `prior-art.md` §5 (consolidated table) |
+| What to copy, what to avoid | `prior-art.md` §6, §7 |
+| The acceptance cases | `synthesis.md` §5 |
+
+## Settled — reopen only with new evidence
+
+- polytag is the composition tier (depends on both storage and UI sides); library pieces that depend on one side go upstream.
+- Memberships default to **embedded** (`groups` id array on the item record); `GroupStore` is the opt-in for group-to-group edges, edge order and labels at scale.
+- Import default = the shape people already have; export default = the lossless grammar for the dataset's profile, with its loss report shown.
+- A board over a non-exclusive tag family needs an explicit `multiValue` policy.
+- No AGPL/GPL code copied; formats implemented from their documentation.
