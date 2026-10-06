@@ -13,6 +13,19 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "formats": [
+        "./dist/formats.d.ts"
+      ],
+      "backends": [
+        "./dist/backends.d.ts"
+      ],
+      "views": [
+        "./dist/views.d.ts"
+      ]
+    }
+  },
   "exports": {
     ".": {
       "import": {

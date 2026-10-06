@@ -59,6 +59,7 @@ NOT seams:      playground layout and styling, sample datasets, loss-report word
 - Every upstream gap polytag needs is filed in the upstream repo, not worked around in polytag.
 - polytag's tag-agnostic parts ship as subpaths (`polytag/formats`, `polytag/backends`, `polytag/views`). A metafile check in CI fails if any of them imports `@zodal/groups-*` (the pattern of [comparanda](https://github.com/thorwhalen/comparanda) ADR-0005). The first consumer without tags (e.g. the instruments view of zodal#14) triggers their extraction into zodal.
 - Backends are compositions: the catalog describes a metadata × content pair (`createBifurcatedProvider`) as well as single providers.
+- Membership modes (embedded ids vs a `GroupStore`, issue #2) depend on zodal-groups, so they live in the root entry, not in `polytag/backends`; the backend catalog only describes where item records and content live.
 - Operations are declared once, as acture-shaped commands (the fleet's frontend invariant: user actions are commands declared once). polytag keeps no command list and no undo stack of its own.
 - Rejected: a generic `@zodal/compose` package now. Nothing would exercise it yet; the subpath boundary keeps the later split mechanical, and the first untagged consumer is the trigger.
 - Rejected: putting everything in zodal-groups (it would make that monorepo depend on both storage and UI sides and on parser libraries, against its own dependency rule); a new `zodal-store-*` or `zodal-ui-*` satellite (the work is neither one backend nor one UI library).

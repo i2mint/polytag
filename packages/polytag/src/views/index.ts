@@ -6,16 +6,15 @@
  *
  * extraction candidate: zodal (zodal#14 view generators)
  *
- * Scaffold only: the menu is real but starts empty, and its entry type is a
- * parameter. `ViewConfig`, applicability and the ranked default menu are
- * i2mint/polytag#3.
+ * Scaffold only: a real, empty menu over a caller-chosen view type. `ViewConfig`,
+ * applicability and the ranked default menu are i2mint/polytag#3.
  */
 
-import { createRegistry, type Identified, type Registry } from '../internal/registry.js';
+import { createRegistry, type Registry } from '../internal/registry.js';
 
-export type { Registry, Identified } from '../internal/registry.js';
+export type { Registry, RegistryOptions } from '../internal/registry.js';
 
-/** Create an empty view menu over view entries of type `V`. */
-export function createViewMenu<V extends Identified>(): Registry<V> {
-  return createRegistry<V>('view');
+/** Create an empty view menu; `keyOf` gives each view's unique key. */
+export function createViewMenu<V>(keyOf: (view: V) => string): Registry<V> {
+  return createRegistry(keyOf, { kind: 'view' });
 }

@@ -1,0 +1,9 @@
+{
+  "name": "fixture-pkg-missing-types",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "import": { "types": "./out/index.d.ts", "default": "./out/index.js" } },
+    "./views": { "import": { "default": "./out/views.js" } }
+  }
+}

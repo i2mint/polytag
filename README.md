@@ -37,11 +37,13 @@ pnpm check:boundaries
 |---|---|
 | `packages/polytag` | the `polytag` npm package: `polytag` (tag-aware root), `polytag/formats`, `polytag/backends`, `polytag/views` (tag-agnostic) |
 | `apps/playground` | private Vite app, not published |
+| `packages/polytag/subpaths.json` | the list of subpaths, their sources and which are tag-aware (read by tsup and the boundary check) |
 | `scripts/check-boundaries.mjs` | the boundary check below |
+| `scripts/release-gate.mjs` | decides whether a push to `main` publishes |
 
-**The boundary rule.** `polytag/formats`, `polytag/backends` and `polytag/views` are tag-agnostic: they must never import `@zodal/groups-*`, so they can move to zodal when a consumer without tags appears ([ADR 0001](docs/decisions/0001-placement-and-seams.md) §Consequences). `scripts/check-boundaries.mjs` bundles each with esbuild and fails if the metafile shows any `@zodal/groups-*` (or a local `zodal-groups` checkout) in it; CI runs it on every push. A new subpath export must be classified as tag-aware or tag-agnostic in that script, or the check fails.
+**The boundary rule.** `polytag/formats`, `polytag/backends` and `polytag/views` are tag-agnostic: they must never import `@zodal/groups-*`, so they can move to zodal when a consumer without tags appears ([ADR 0001](docs/decisions/0001-placement-and-seams.md) §Consequences). `scripts/check-boundaries.mjs` checks each one's source, every built JS file and every `.d.ts` that `exports` names: it fails on any `@zodal/groups-*` (or local `zodal-groups` checkout) they bundle, import, name in a string or declare through a dependency, on reaching the tag-aware root, and on an `import()`/`require()` with a computed argument. CI runs it after the build.
 
-**Releases.** Only a commit whose *subject* contains `[publish]` publishes, from CI, with `pnpm -r publish` (never `npm publish`: it ships `workspace:*` literally). `@zodal/*` packages are peers with a caret on the lowest version used ([zodal versioning](https://github.com/i2mint/zodal/blob/main/docs/versioning.md)); none is a dependency yet.
+**Releases.** A push to `main` publishes when a commit *subject* since the last `v*` tag contains `[publish]` **and** the version in `packages/polytag/package.json` is not on npm yet (a marker without a version bump publishes nothing; the run says so in a notice). The publish job waits for approval on the `npm-publish` environment, publishes with `pnpm -r publish` (never `npm publish`: it ships `workspace:*` literally), checks the registry serves the version, then tags `v<version>`. `@zodal/*` packages are peers with a caret on the lowest version used ([zodal versioning](https://github.com/i2mint/zodal/blob/main/docs/versioning.md)); none is a dependency yet.
 
 ## License
 
