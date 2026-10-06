@@ -1,0 +1,1 @@
+{ ".": { "source": "src/index.ts", "tagAware": true }, "./views": { "source": "src/views/index.ts" } }

@@ -12,10 +12,26 @@ import { describe, expect, it } from 'vitest';
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
 
-/** The named runtime exports of each subpath (the root has none until #1/#4). */
+/** The named runtime exports of each subpath. */
 const EXPECTED: Record<string, string[]> = {
-  '.': [],
-  './formats': ['createFormatRegistry'],
+  '.': [
+    'CONTAINS', 'DEFAULT_MAX_BYTES', 'FORMAT_DEFAULTS', 'applyImport', 'assess', 'compareOrder',
+    'compatibility', 'contentHash', 'createGrammarRegistry', 'defaultEdgeId', 'defaultGrammars',
+    'defaultIsMembership', 'defineGrammar', 'delimited', 'delimitedParams', 'detect', 'diffSpaces',
+    'edgeHash', 'edgeIdMinter', 'edgeRows', 'edgeRowsParams', 'emptySpace', 'exceedsBytes', 'exportChoices',
+    'featuresOf', 'findCycles', 'formatDiagnostic', 'formattingLosses', 'fromCollectionSeed', 'grammarCodec',
+    'isCompatible', 'limitValues', 'lossReport', 'membersMap', 'membersMapParams', 'nested', 'nestedParams',
+    'noDetection', 'nodeHash', 'nodeLink', 'nodeLinkParams', 'oneHot', 'oneHotParams', 'planImport',
+    'positionalOrders', 'previewOf', 'readText', 'reduce', 'roundTrip', 'sameValue', 'scopeSpace',
+    'snapshotOf', 'stableStringify', 'tagPaths', 'tagPathsParams', 'tagsArray', 'tagsArrayParams',
+    'textCodec', 'toCollectionSeed', 'writeText',
+  ],
+  './formats': [
+    'DEFAULT_MAX_LINE_LENGTH', 'FormatError', 'createFormatRegistry', 'csv', 'defaultFormats',
+    'detectFormat', 'extensionOf', 'findPaths', 'hashComments', 'ioAffordances', 'isFormatError',
+    'isPlainObject', 'isTable', 'json', 'jsonc', 'locate', 'slashComments', 'stripValues', 'toml',
+    'tomlComments', 'tryDecode', 'tsv', 'yaml', 'yamlComments',
+  ],
   './backends': ['createBackendCatalog'],
   './views': ['createViewMenu'],
 };

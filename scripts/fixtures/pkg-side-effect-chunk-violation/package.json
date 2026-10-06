@@ -1,0 +1,10 @@
+{
+  "name": "fixture-pkg-side-effect-chunk-violation",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": { "import": { "types": "./out/index.d.ts", "default": "./out/index.js" } },
+    "./views": { "import": { "types": "./out/views.d.ts", "default": "./out/views.js" } }
+  }
+}

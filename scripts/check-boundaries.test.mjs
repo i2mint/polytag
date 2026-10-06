@@ -176,6 +176,41 @@ describe('check-boundaries, whole package (subpaths.json + exports)', () => {
     });
   });
 
+  // A code-split entry bare-imports chunks (`import './chunk.js'`) for evaluation order; with
+  // `sideEffects: false` a bundler may drop them, but Node runs them, so the check follows them.
+  it('follows a bare chunk import in a side-effect-free package: clean passes without warnings', async () => {
+    const { errors, results } = await checkFixturePackage('pkg-side-effect-chunk-clean');
+    expect(errors).toEqual([]);
+    expect(results.flatMap((r) => r.violations)).toEqual([]);
+  });
+
+  it('follows a bare chunk import in a side-effect-free package: a groups import there fails', async () => {
+    const { results } = await checkFixturePackage('pkg-side-effect-chunk-violation');
+    const byEntry = Object.fromEntries(results.map((r) => [r.entry, r.violations]));
+    expect(byEntry['pkg-side-effect-chunk-violation/out/views.js']).toContainEqual({
+      kind: 'imports',
+      path: '@zodal/groups-core',
+      from: 'pkg-side-effect-chunk-violation/out/chunk-b.js',
+    });
+  });
+
+  // A bundler can hoist root-only code into a chunk a tag-agnostic entry imports; the chunk is
+  // the package's own file and imports nothing forbidden, so only its source map tells.
+  it('passes a shared chunk whose source map lists only shared sources', async () => {
+    const { errors, results } = await checkFixturePackage('pkg-hoisted-root-clean');
+    expect(errors).toEqual([]);
+    expect(results.flatMap((r) => r.violations)).toEqual([]);
+  });
+
+  it('fails a shared chunk whose source map lists a source only the tag-aware root reaches', async () => {
+    const { results } = await checkFixturePackage('pkg-hoisted-root-violation');
+    const byEntry = Object.fromEntries(results.map((r) => [r.entry, r.violations]));
+    expect(byEntry['pkg-hoisted-root-violation/out/views.js']).toEqual([
+      { kind: 'bundles root-owned source', path: 'pkg-hoisted-root-violation/src/root-only.ts', from: 'pkg-hoisted-root-violation/out/chunk.js' },
+    ]);
+    expect(byEntry['pkg-hoisted-root-violation/src/views/index.ts']).toEqual([]);
+  });
+
   it('fails a tag-agnostic subpath export without a types file', async () => {
     const { errors } = await checkFixturePackage('pkg-missing-types');
     expect(errors).toEqual([expect.stringMatching(/exports\['\.\/views'\] needs a types file for every condition \(missing at: import\)/)]);

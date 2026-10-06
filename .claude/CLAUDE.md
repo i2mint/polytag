@@ -1,6 +1,6 @@
 # polytag — agent guide
 
-**Stage: SCAFFOLD (i2mint/polytag#12): build, tests and CI in place; no real API yet. Next: #1 (formats × grammars).** Headless CRUD for tag-based (polyhierarchical) collections: the composition tier over zodal and zodal-groups (formats × grammars, backend menu, view menu, one-call facade, playground, shipped agent skill).
+**Stage: DATA IN (i2mint/polytag#1): formats, grammars, loss report, detection, import plan and the round-trip gate. Next: #2 (backend menu), #3 (view menu).** Headless CRUD for tag-based (polyhierarchical) collections: the composition tier over zodal and zodal-groups (formats × grammars, backend menu, view menu, one-call facade, playground, shipped agent skill).
 
 ## Before anything
 
@@ -14,9 +14,10 @@
 |---|---|
 | `packages/polytag/subpaths.json` | **SSOT** for subpaths: source entry and tag-aware flag; `tsup.config.ts` and the boundary check read it |
 | `packages/polytag/src/index.ts` | root entry, **tag-aware**: grammars, membership modes (embedded / `GroupStore`), the facade (may import `@zodal/groups-*`) |
+| `packages/polytag/src/{model,grammars}/`, `src/{loss,grammar,detect,io,import-plan,scope,collection-seed}.ts` | data in (#1): the snapshot model and features; capabilities, `reduce` and value limits; the grammar contract (`defineGrammar`, whose `plan` is the one place a write's losses are decided); the eight v1 grammars; two-stage detection; `readText`/`writeText`/`roundTrip`; import plan; export scope |
 | `packages/polytag/src/{formats,backends,views}/` | subpaths `polytag/formats`, `/backends`, `/views`, **tag-agnostic** |
 | `packages/polytag/src/internal/` | shared tag-agnostic helpers (a registry keyed by a caller-supplied selector) |
-| `packages/polytag/tests/` | vitest; `exports.test.ts` loads every built subpath under import and require, `types-resolution.test.ts` resolves its types under node10 / node16 / bundler |
+| `packages/polytag/tests/` | vitest; `roundtrip.test.ts` is **the round-trip gate** (every grammar × format × RD/P/K must equal what the loss report predicts), `fuzz.test.ts` its seeded property-test twin, `review.test.ts` and `verify.test.ts` the PR #16 review and verification regressions; `exports.test.ts` loads every built subpath under import and require, `types-resolution.test.ts` resolves its types under node10 / node16 / bundler |
 | `apps/playground` | private Vite + TS app (vanilla), not published |
 | `scripts/check-boundaries.mjs` | boundary check: tag-agnostic sources, built JS and `.d.ts` never reach `@zodal/groups-*` or the root; tests + fixtures beside it |
 | `scripts/release-gate.mjs` | CI release decision: a `[publish]` subject since the last `v*` tag + an unpublished version |
