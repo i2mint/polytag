@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Superseded PR runs are cancelled; runs on main never are: cancelling a [publish] run
+# between `pnpm publish` and "Tag release" would leave a version on npm with no git tag.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  validate:
+    name: Validate
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      # ADR 0001 §Consequences: the tag-agnostic subpaths (polytag/formats, /backends,
+      # /views) must never import @zodal/groups-*. Bundles each with esbuild and reads
+      # the metafile.
+      - name: Boundary check
+        run: node scripts/check-boundaries.mjs
+
+  gate:
+    name: Release gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.subject.outputs.publish }}
+      force: ${{ steps.subject.outputs.force }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Only the commit SUBJECT (first line) may arm a release. The previous gate matched the
+      # whole commit message, so a commit that merely *mentioned* the marker in its body --
+      # such as one documenting this very workflow -- published to npm for real.
+      #
+      # The subject is read with git rather than interpolated from the event payload, so an
+      # arbitrary commit message can never be spliced into this shell.
+      - id: subject
+        run: |
+          set -euo pipefail
+          subject=$(git log -1 --pretty=%s)
+          publish=false
+          force=false
+          case "$subject" in
+            *'[force publish]'*) publish=true; force=true ;;
+            *'[publish]'*)       publish=true ;;
+          esac
+          echo "subject: $subject"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "force=$force" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish
+    needs: [validate, gate]
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Publish packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          FORCE_PUBLISH: ${{ needs.gate.outputs.force }}
+        # Always `pnpm publish`, never `npm publish`: only pnpm rewrites `workspace:*`
+        # ranges to real versions. No `|| true`: an expired NPM_TOKEN makes the registry
+        # answer 404 to the PUT, and swallowing that exit code would report a release that
+        # never reached npm as green. `pnpm -r publish` already skips a version the
+        # registry has, so re-running stays idempotent without hiding errors. Private
+        # workspace packages (the root, apps/playground) are skipped by pnpm.
+        run: |
+          set -euo pipefail
+          FORCE=""
+          if [ "$FORCE_PUBLISH" = "true" ]; then
+            FORCE="--no-git-checks"
+          fi
+          pnpm -r publish --access public $FORCE
+
+      # A publish is only real if the registry serves it. Ask the registry, don't infer it
+      # from an exit code. A brand-new package name can 404 for minutes after a successful
+      # publish, so retry before concluding it failed.
+      - name: Verify the registry serves this version
+        run: |
+          set -euo pipefail
+          SPECS=$(node -e '
+            const fs = require("fs");
+            for (const d of fs.readdirSync("packages")) {
+              const p = JSON.parse(fs.readFileSync(`packages/${d}/package.json`, "utf8"));
+              if (!p.private) console.log(`${p.name}@${p.version}`);
+            }')
+          for spec in $SPECS; do
+            version="${spec##*@}"
+            confirmed=""
+            for attempt in $(seq 1 20); do
+              got=$(npm view "$spec" version 2>/dev/null || true)
+              if [ "$got" = "$version" ]; then
+                echo "$spec confirmed on the registry (attempt ${attempt})"
+                confirmed=1
+                break
+              fi
+              echo "$spec not visible yet (attempt ${attempt}/20)"
+              sleep 15
+            done
+            if [ -z "$confirmed" ]; then
+              echo "::error::$spec never appeared on the registry -- the publish failed."
+              exit 1
+            fi
+          done
+
+      - name: Configure SSH for git push
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git remote set-url origin git@github.com:${{ github.repository }}.git
+
+      - name: Tag release
+        # The repo-wide tag is derived from packages/polytag, the one published package.
+        # If the repo ever publishes several packages that version independently, switch
+        # to per-package tags (e.g. polytag@X).
+        run: |
+          VERSION=$(node -e "console.log(require('./packages/polytag/package.json').version)")
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}" || echo "Tag v${VERSION} already exists"
+          git push origin "v${VERSION}" || echo "Tag already pushed"
