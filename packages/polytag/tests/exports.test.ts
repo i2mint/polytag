@@ -12,10 +12,24 @@ import { describe, expect, it } from 'vitest';
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
 
-/** The named runtime exports of each subpath (the root has none until #1/#4). */
+/** The named runtime exports of each subpath. */
 const EXPECTED: Record<string, string[]> = {
-  '.': [],
-  './formats': ['createFormatRegistry'],
+  '.': [
+    'CONTAINS', 'FORMAT_DEFAULTS', 'applyImport', 'assess', 'compareOrder', 'compatibility', 'contentHash',
+    'createGrammarRegistry', 'defaultEdgeId', 'defaultGrammars', 'defaultIsMembership', 'defineGrammar',
+    'delimited', 'delimitedParams', 'detect', 'diffSpaces', 'edgeHash', 'edgeIdMinter', 'edgeRows',
+    'edgeRowsParams', 'emptySpace', 'exportChoices', 'featuresOf', 'findCycles', 'formatDiagnostic',
+    'formattingLosses', 'grammarCodec', 'isCompatible', 'lossReport', 'membersMap', 'membersMapParams',
+    'nested', 'nestedParams', 'noDetection', 'nodeHash', 'nodeLink', 'nodeLinkParams', 'oneHot',
+    'oneHotParams', 'planImport', 'positionalOrders', 'previewOf', 'readText', 'reduce', 'roundTrip',
+    'sameValue', 'scopeSpace', 'snapshotOf', 'stableStringify', 'tagPaths', 'tagPathsParams', 'tagsArray',
+    'tagsArrayParams', 'textCodec', 'writeText',
+  ],
+  './formats': [
+    'FormatError', 'createFormatRegistry', 'csv', 'defaultFormats', 'detectFormat', 'extensionOf',
+    'findPaths', 'hashComments', 'ioAffordances', 'isPlainObject', 'isTable', 'json', 'jsonc',
+    'slashComments', 'stripValues', 'toml', 'tryDecode', 'tsv', 'yaml',
+  ],
   './backends': ['createBackendCatalog'],
   './views': ['createViewMenu'],
 };

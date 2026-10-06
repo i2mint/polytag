@@ -13,7 +13,8 @@
  *
  * 1. Code: the source entry AND every built JS file the exports map names (`import`,
  *    `require`, `default`...), each bundled by esbuild (nothing external but Node
- *    built-ins; `import()` included). Violations: a bundled file or import specifier
+ *    built-ins; `import()` included; `sideEffects` and pure annotations ignored, so a bare
+ *    `import './chunk.js'` is followed). Violations: a bundled file or import specifier
  *    matching a forbidden pattern; reaching the tag-aware root (its source or built
  *    files); any esbuild warning; in the package's own files, a string literal naming a
  *    forbidden package (catches type-only imports and `createRequire`) or an
@@ -147,6 +148,10 @@ export async function checkSources({
       platform: 'node',
       format: 'esm',
       logLevel: 'silent',
+      // Follow every import a runtime would execute, even ones a bundler may drop because the
+      // package says `sideEffects: false` (a code-split entry bare-imports the chunks it needs
+      // for evaluation order): fail closed, and no "ignoring this import" warning.
+      ignoreAnnotations: true,
     });
     const violations = warnings.map((w) => ({
       kind: 'esbuild warning',
