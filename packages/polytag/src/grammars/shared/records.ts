@@ -29,12 +29,24 @@ export const isFamilyRule = (value: unknown): value is FamilyRule =>
   isPlainObject(value) && Number.isInteger(value.maxPerItem) && (value.maxPerItem as number) >= 1 && Object.keys(value).length === 1;
 
 /**
- * Read a scalar where a string (an id, a tag) is expected. Numbers and booleans are
- * stringified with a `coerced-scalar` warning (YAML 1.2 reads `010` as 10 and, in 1.1,
- * `yes` as true); anything else is `undefined`.
+ * Read a scalar where a string (an id, a tag) is expected. Numbers, booleans and dates (a
+ * TOML datetime) are stringified with a `coerced-scalar` warning (YAML 1.2 reads `010` as 10
+ * and, in 1.1, `yes` as true); anything else is `undefined`.
  */
 export function coerceString(value: unknown, what: string, path: string, builder: SpaceBuilder): string | undefined {
   if (typeof value === 'string') return value;
+  if (value instanceof Date) {
+    const s = value.toISOString();
+    builder.diag({
+      severity: 'warning',
+      code: 'coerced-scalar',
+      message: `${what} ${s} is a date, read as the string '${s}'`,
+      path,
+      ids: [s],
+      hint: 'quote it in the source to keep its exact spelling',
+    });
+    return s;
+  }
   if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
     const s = String(value);
     builder.diag({

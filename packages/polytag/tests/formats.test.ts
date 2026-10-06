@@ -137,7 +137,7 @@ describe('polytag/formats: stage 1 detection (sniff, then confirm by decoding)',
     expect((await detectFormat('a: 1\n', { filename: 'x.yml' })).decoded?.format).toBe('yaml');
     const d = await detectFormat('{\n  // c\n  "a": 1\n}', { filename: 'settings.json' });
     expect(d.decoded?.format).toBe('jsonc');
-    expect(d.candidates.find((c) => c.format === 'json')?.error).toBeInstanceOf(FormatError);
+    expect(d.candidates.find((c) => c.format === 'json')?.error).toMatchObject({ format: 'json', code: 'syntax', message: expect.any(String) });
   });
 
   it('comment scanners skip quoted text', () => {

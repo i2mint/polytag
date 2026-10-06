@@ -14,8 +14,8 @@
  * extraction candidate: a zodal format package (second consumer: zodal-dials TOML/YAML stores)
  */
 
-import { hashComments } from './comments.js';
-import { type FormatCodec, type FormatDescriptor, FormatError, type FormatSniff, asFormatError, firstChar } from './types.js';
+import { yamlComments } from './comments.js';
+import { type FormatCodec, type FormatDescriptor, FormatError, type FormatSniff, asFormatError, firstChar, positionOf, sniffLines } from './types.js';
 
 /** Options of the `yaml` codec. */
 export interface YamlOptions {
@@ -33,7 +33,8 @@ const DEFAULTS = { version: '1.2', maxAliasCount: 100, indent: 2, aliasDuplicate
 
 type YamlLib = typeof import('yaml');
 let yamlLib: Promise<YamlLib> | undefined;
-const loadYaml = (): Promise<YamlLib> => (yamlLib ??= import('yaml'));
+/** Load `yaml` once. */
+export const loadYaml = (): Promise<YamlLib> => (yamlLib ??= import('yaml'));
 
 const YAML_LINE = /^\s*(-(\s|$)|---|\.\.\.|[^\s#=[{][^=]*?:(\s|$)|#)/;
 const TOML_LINE = /^\s*(\[\[?[\w."'-]+\]\]?\s*$|[\w."'-]+\s*=\s*\S)/;
@@ -46,20 +47,22 @@ export const yaml: FormatDescriptor<unknown, YamlOptions> = {
   mediaTypes: ['application/yaml', 'text/yaml'],
   kind: 'value',
   rootArray: true,
+  limits: { null: true, nonFinite: true },
   sniff(text): FormatSniff {
     const c = firstChar(text);
     if (c === '{' || c === '[') return { score: 0.35, evidence: ['flow collection (YAML is a JSON superset; JSON preferred)'] };
-    const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '');
+    const lines = sniffLines(text).filter((l) => l.trim() !== '');
     if (!lines.length) return { score: 0, evidence: [] };
     const yamlLines = lines.filter((l) => YAML_LINE.test(l)).length;
     const tomlLines = lines.filter((l) => TOML_LINE.test(l)).length;
     if (tomlLines > yamlLines) return { score: 0.1, evidence: ['more `key = value` lines than `key: value` lines'] };
     const ratio = yamlLines / lines.length;
     const evidence = [`${yamlLines} of ${lines.length} lines look like YAML (\`key:\`, \`- item\`, \`---\`)`];
-    if (/(^|[\s[,{])&[\w-]+/m.test(text) && /(^|[\s[,{])\*[\w-]+/m.test(text)) evidence.push('has anchors and aliases');
+    const head = lines.join('\n');
+    if (/(^|[\s[,{])&[\w-]+/m.test(head) && /(^|[\s[,{])\*[\w-]+/m.test(head)) evidence.push('has anchors and aliases');
     return { score: ratio > 0 ? 0.4 + 0.5 * ratio : 0.05, evidence };
   },
-  inspect: (text) => ({ comments: hashComments(text) }),
+  inspect: (text) => ({ comments: yamlComments(text) }),
   unrepresentable: () => [],
   async load(options = {}): Promise<FormatCodec> {
     const { version, maxAliasCount, indent, aliasDuplicateObjects } = { ...DEFAULTS, ...options };
@@ -87,6 +90,7 @@ export const yaml: FormatDescriptor<unknown, YamlOptions> = {
           throw asFormatError('yaml', error);
         }
       },
+      dialect: (text) => (/^%YAML\s+1\.1\b/m.test(text.slice(0, 4096)) ? { version: '1.1' } : {}),
       encode(value) {
         try {
           return lib.stringify(value, { version, indent, aliasDuplicateObjects });
@@ -97,3 +101,21 @@ export const yaml: FormatDescriptor<unknown, YamlOptions> = {
     };
   },
 };
+
+/** The 1-based line and column of the node a JSON pointer names in a YAML text, or `undefined`. */
+export async function yamlPosition(text: string, pointer: string): Promise<{ line: number; column: number } | undefined> {
+  const lib = await loadYaml();
+  const doc = lib.parseDocument(text, { uniqueKeys: false });
+  let node: unknown = doc.contents;
+  const segments = pointer === '' ? [] : pointer.slice(1).split('/').map((s) => s.replace(/~1/g, '/').replace(/~0/g, '~'));
+  for (const seg of segments) {
+    if (lib.isSeq(node)) node = node.items[Number(seg)];
+    else if (lib.isMap(node)) {
+      const pairs = node.items.filter((p) => (lib.isScalar(p.key) ? String(p.key.value) : String(p.key)) === seg);
+      node = pairs.at(-1)?.value;
+    } else return undefined;
+    if (lib.isAlias(node)) node = node.resolve(doc);
+  }
+  const range = (node as { range?: [number, number, number] } | undefined)?.range;
+  return range ? positionOf(text, range[0]) : undefined;
+}

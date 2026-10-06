@@ -18,7 +18,7 @@ import { isPlainObject } from '../formats/index.js';
 import { type Detection, defineGrammar, noDetection } from '../grammar.js';
 import type { GrammarCapabilities } from '../loss.js';
 import { type SnapshotEdge, compareOrder, positionalOrders } from '../model/snapshot.js';
-import { createSpaceBuilder } from './shared/builder.js';
+import { createSpaceBuilder, seg } from './shared/builder.js';
 import { coerceString, hasOwn, own } from './shared/records.js';
 import { LEXICON, inLexicon, isScalar } from './shared/shape.js';
 
@@ -93,7 +93,7 @@ export const membersMap = defineGrammar<MembersMapParams>({
       return builder.build();
     }
     for (const [group, list] of Object.entries(input)) {
-      const path = `/${group}`;
+      const path = `/${seg(group)}`;
       builder.node(group);
       if (list === null) continue;
       if (!Array.isArray(list)) {
@@ -112,8 +112,8 @@ export const membersMap = defineGrammar<MembersMapParams>({
         let label: string | undefined;
         let meta: Record<string, unknown> | undefined;
         if (isPlainObject(m)) {
-          child = coerceString(own(m, p.idKey), 'member id', `${at}/${p.idKey}`, builder);
-          label = coerceString(own(m, p.labelKey), 'member label', `${at}/${p.labelKey}`, builder);
+          child = coerceString(own(m, p.idKey), 'member id', `${at}/${seg(p.idKey)}`, builder);
+          label = coerceString(own(m, p.labelKey), 'member label', `${at}/${seg(p.labelKey)}`, builder);
           const rawMeta = own(m, p.metaKey);
           if (isPlainObject(rawMeta)) meta = rawMeta;
           else if (rawMeta !== undefined) builder.diag({ severity: 'warning', code: 'ignored-field', message: `'${p.metaKey}' is not an object; ignored`, path: at, ids: [group] });

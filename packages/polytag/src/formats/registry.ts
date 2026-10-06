@@ -6,11 +6,11 @@
  */
 
 import { createRegistry, type Registry } from '../internal/registry.js';
-import { csv, tsv } from './csv.js';
-import { json, jsonc } from './json.js';
+import { csv, csvRowLine, tsv } from './csv.js';
+import { json, jsonOffset, jsonTree, jsonc } from './json.js';
 import { toml } from './toml.js';
-import { type FormatCodec, type FormatDescriptor, type FormatError, tryDecode } from './types.js';
-import { yaml } from './yaml.js';
+import { type FormatCodec, type FormatDescriptor, type FormatErrorInfo, type Location, positionOf, tryDecode } from './types.js';
+import { yaml, yamlPosition } from './yaml.js';
 
 /** A format of any value and option type, as a registry holds them. */
 export type AnyFormat = FormatDescriptor<any, any>;
@@ -68,8 +68,8 @@ export interface FormatCandidate {
   /** 0..1 after confirmation (a failed decode divides the sniff score by 10). */
   readonly score: number;
   readonly evidence: readonly string[];
-  /** Set when a trial decode was attempted and failed. */
-  readonly error?: FormatError;
+  /** Set when a trial decode was attempted and failed (plain data, serialisable). */
+  readonly error?: FormatErrorInfo;
 }
 
 /** The outcome of {@link detectFormat}. */
@@ -121,7 +121,7 @@ export async function detectFormat(text: string, options: DetectFormatOptions = 
       decoded = { format: candidate.format, codec, value: result.value };
       confirmed.push({ ...candidate, evidence: [...candidate.evidence, 'decodes'] });
     } else {
-      confirmed.push({ ...candidate, score: candidate.score / 10, evidence: [...candidate.evidence, `does not decode: ${result.error.message}`], error: result.error });
+      confirmed.push({ ...candidate, score: candidate.score / 10, evidence: [...candidate.evidence, `does not decode: ${result.error.message}`], error: result.error.toJSON() });
     }
   }
   confirmed.sort((a, b) => b.score - a.score);
@@ -137,3 +137,20 @@ export function ioAffordances(formats: FormatRegistry = createFormatRegistry()):
   return { import: ids, export: [...ids] };
 }
 
+
+/**
+ * The 1-based line and column of a location (a JSON pointer, or a table row) in a text of
+ * this format, for showing a diagnostic next to the offending line. JSON, JSONC and YAML
+ * resolve pointers through a parse tree; CSV and TSV count records (quoted line breaks
+ * included). `undefined` when the format keeps no positions (TOML) or the location is not
+ * found.
+ */
+export async function locate(text: string, format: string, at: Location, options: { delimiter?: string } = {}): Promise<{ line: number; column: number } | undefined> {
+  if ('row' in at) return format === 'csv' || format === 'tsv' ? csvRowLine(text, at.row, options.delimiter ?? (format === 'tsv' ? '\t' : undefined)) : undefined;
+  if (format === 'json' || format === 'jsonc') {
+    const offset = jsonOffset(await jsonTree(text), at.pointer);
+    return offset === undefined ? undefined : positionOf(text, offset);
+  }
+  if (format === 'yaml') return yamlPosition(text, at.pointer);
+  return undefined;
+}

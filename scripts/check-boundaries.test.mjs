@@ -194,6 +194,23 @@ describe('check-boundaries, whole package (subpaths.json + exports)', () => {
     });
   });
 
+  // A bundler can hoist root-only code into a chunk a tag-agnostic entry imports; the chunk is
+  // the package's own file and imports nothing forbidden, so only its source map tells.
+  it('passes a shared chunk whose source map lists only shared sources', async () => {
+    const { errors, results } = await checkFixturePackage('pkg-hoisted-root-clean');
+    expect(errors).toEqual([]);
+    expect(results.flatMap((r) => r.violations)).toEqual([]);
+  });
+
+  it('fails a shared chunk whose source map lists a source only the tag-aware root reaches', async () => {
+    const { results } = await checkFixturePackage('pkg-hoisted-root-violation');
+    const byEntry = Object.fromEntries(results.map((r) => [r.entry, r.violations]));
+    expect(byEntry['pkg-hoisted-root-violation/out/views.js']).toEqual([
+      { kind: 'bundles root-owned source', path: 'pkg-hoisted-root-violation/src/root-only.ts', from: 'pkg-hoisted-root-violation/out/chunk.js' },
+    ]);
+    expect(byEntry['pkg-hoisted-root-violation/src/views/index.ts']).toEqual([]);
+  });
+
   it('fails a tag-agnostic subpath export without a types file', async () => {
     const { errors } = await checkFixturePackage('pkg-missing-types');
     expect(errors).toEqual([expect.stringMatching(/exports\['\.\/views'\] needs a types file for every condition \(missing at: import\)/)]);

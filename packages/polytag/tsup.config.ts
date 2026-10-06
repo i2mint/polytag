@@ -11,6 +11,9 @@ const entry = Object.fromEntries(
 export default defineConfig({
   entry,
   format: ['cjs', 'esm'],
+  // Split CJS too: each entry then requires the shared chunks instead of carrying its own copy
+  // (one FormatError class across `polytag` and `polytag/formats`).
+  splitting: true,
   dts: true,
   clean: true,
   sourcemap: true,

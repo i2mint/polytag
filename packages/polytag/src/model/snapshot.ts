@@ -121,12 +121,15 @@ export function snapshotOf<P>(space: {
 // ── stable serialisation and hashing ────────────────────────────────────────
 
 /**
- * JSON with object keys sorted (by code unit), so equal values serialise equally. `undefined`
- * object values are skipped, as in JSON; a cycle is written as `"[Circular]"`.
+ * A canonical text of a JSON-like value: object keys sorted (by code unit), so equal values
+ * serialise equally. `undefined` object values are skipped, as in JSON; unlike JSON,
+ * `NaN`, `Infinity` and `-Infinity` stay distinct from `null` (bare tokens), a BigInt is
+ * `123n`, and a cycle is `"[Circular]"`. Not JSON: a comparison key.
  */
 export function stableStringify(value: unknown): string {
   const stack = new Set<object>();
   const write = (v: unknown): string => {
+    if (typeof v === 'number' && !Number.isFinite(v)) return String(v);
     if (v === null || typeof v !== 'object') return typeof v === 'bigint' ? `${v}n` : (JSON.stringify(v) ?? 'null');
     if (stack.has(v)) return '"[Circular]"';
     stack.add(v);
@@ -157,7 +160,10 @@ function cyrb53(text: string): string {
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, '0');
 }
 
-/** A content hash of any JSON-like value (key order does not matter). */
+/**
+ * A short content hash of any JSON-like value (key order does not matter), for display and
+ * indexing. Not for deciding equality: 53 bits collide; compare `stableStringify` instead.
+ */
 export const contentHash = (value: unknown): string => cyrb53(stableStringify(value));
 
 /** Deep equality of JSON-like values (key order does not matter). */
@@ -255,6 +261,10 @@ export function diffSpaces(expected: SpaceSnapshot, actual: SpaceSnapshot): Spac
   const extraEdges = [...ae.keys()].filter((id) => !ee.has(id));
   const changedEdges = [...ee.keys()].filter((id) => ae.has(id) && !sameValue(edgeContent(ee.get(id)!), edgeContent(ae.get(id)!)));
 
+  // Ranks: by order, ties by position in the edge list (as every writer lays them out).
+  const position = (xs: readonly SnapshotEdge[]): Map<string, number> => new Map(xs.map((e, i) => [e.id, i]));
+  const ePos = position(expected.edges);
+  const aPos = position(actual.edges);
   const orderedByParent = new Map<string, SnapshotEdge[]>();
   for (const e of expected.edges) {
     if (e.order === undefined || !ae.has(e.id)) continue;
@@ -263,15 +273,13 @@ export function diffSpaces(expected: SpaceSnapshot, actual: SpaceSnapshot): Spac
     else orderedByParent.set(e.parent, [e]);
   }
   const reordered: string[] = [];
-  const byOrderThenId = (order: (e: SnapshotEdge) => string | undefined) => (a: SnapshotEdge, b: SnapshotEdge) =>
-    compareOrder(order(a), order(b)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   for (const [parent, list] of orderedByParent) {
-    const want = [...list].sort(byOrderThenId((e) => e.order)).map((e) => e.id);
     if (list.some((e) => ae.get(e.id)!.order === undefined)) {
       reordered.push(parent);
       continue;
     }
-    const got = [...list].sort(byOrderThenId((e) => ae.get(e.id)!.order)).map((e) => e.id);
+    const want = [...list].sort((a, b) => compareOrder(a.order, b.order) || ePos.get(a.id)! - ePos.get(b.id)!).map((e) => e.id);
+    const got = [...list].sort((a, b) => compareOrder(ae.get(a.id)!.order, ae.get(b.id)!.order) || aPos.get(a.id)! - aPos.get(b.id)!).map((e) => e.id);
     if (want.join('\u0000') !== got.join('\u0000')) reordered.push(parent);
   }
   const equal = [missingNodes, extraNodes, changedNodes, missingEdges, extraEdges, changedEdges, reordered].every((x) => x.length === 0);

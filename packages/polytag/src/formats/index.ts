@@ -20,6 +20,11 @@ export {
   type FormatDescriptor,
   FormatError,
   type FormatErrorCode,
+  type FormatErrorInfo,
+  type FormatWarning,
+  type Location,
+  type ValueLimits,
+  isFormatError,
   type FormatKind,
   type FormatSniff,
   type FormattingInfo,
@@ -39,11 +44,12 @@ export {
   detectFormat,
   extensionOf,
   ioAffordances,
+  locate,
 } from './registry.js';
 export { json, jsonc, type JsonOptions } from './json.js';
 export { yaml, type YamlOptions } from './yaml.js';
 export { toml, type TomlOptions } from './toml.js';
 export { csv, tsv, type CsvOptions } from './csv.js';
-export { hashComments, slashComments } from './comments.js';
+export { hashComments, slashComments, tomlComments, yamlComments } from './comments.js';
 export { findPaths, isPlainObject, stripValues } from './values.js';
 export type { Registry, RegistryOptions } from '../internal/registry.js';

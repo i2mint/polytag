@@ -10,8 +10,8 @@
  * extraction candidate: a zodal format package (second consumer: zodal-dials TOML/YAML stores)
  */
 
-import { hashComments } from './comments.js';
-import { type FormatCodec, type FormatDescriptor, FormatError, type FormatSniff, asFormatError } from './types.js';
+import { tomlComments } from './comments.js';
+import { type FormatCodec, type FormatDescriptor, FormatError, type FormatSniff, asFormatError, sniffLines } from './types.js';
 import { findPaths, isPlainObject, stripValues } from './values.js';
 
 /** Options of the `toml` codec (none yet). */
@@ -33,8 +33,9 @@ export const toml: FormatDescriptor<unknown, TomlOptions> = {
   mediaTypes: ['application/toml'],
   kind: 'value',
   rootArray: false,
+  limits: { null: false, nonFinite: true },
   sniff(text): FormatSniff {
-    const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '' && !l.trim().startsWith('#'));
+    const lines = sniffLines(text).filter((l) => l.trim() !== '' && !l.trim().startsWith('#'));
     if (!lines.length) return { score: 0, evidence: [] };
     const headers = lines.filter((l) => HEADER.test(l)).length;
     const pairs = lines.filter((l) => KEY_VALUE.test(l)).length;
@@ -43,7 +44,7 @@ export const toml: FormatDescriptor<unknown, TomlOptions> = {
     const evidence = [`${headers + pairs} of ${lines.length} lines are \`[table]\` headers or \`key = value\` pairs`];
     return { score: Math.min(0.9, 0.3 + 0.6 * ratio + (headers ? 0.1 : 0)), evidence };
   },
-  inspect: (text) => ({ comments: hashComments(text) }),
+  inspect: (text) => ({ comments: tomlComments(text) }),
   unrepresentable: (value) => findPaths(value, isNullish),
   async load(): Promise<FormatCodec> {
     const lib = await loadToml();

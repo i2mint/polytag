@@ -50,7 +50,7 @@ metadata:
 ## Data in, as built (i2mint/polytag#1) — where it departs from `formats-and-grammars.md`
 
 - **A format is a `FormatDescriptor`** (sync: id, extensions, `sniff`, comment `inspect`, `unrepresentable`) whose `load()` resolves to a zodal `Codec<string, V>`; both directions throw `FormatError`. `patch` (comment-preserving writes) is not in v1.
-- **`reduce(space, capabilities)` is the single source of what a grammar keeps.** `assess` (before writing) and every `serialise` go through it; the gate checks `parse(serialise(S)) ≅ reduce(S).space` for every grammar × format.
+- **`grammar.plan(space, params, ctx)` is the single source of what a write keeps**: `reduce` to the capabilities, the format's value limits (TOML: no null; JSON: no NaN), then the grammar's own checks. `assess`, `exportChoices` and `writeText` all report through it, and the gate and the fuzz check `parse(write(S)) ≅ plan(S).space`. What a grammar cannot write faithfully (a group id containing the CSV delimiter or the path separator, a parallel membership as paths) is **left out and reported**, never written so that it reads back as something else.
 - **Loss kinds are named after the feature** (`group-edges`, `item-multi-parent`, `edge-order`, `isolated-node`, `formatting`, `format-value`…); the severity says drop / degrade / encode. Each loss lists **every** affected id (`ids`), not a sample, so the report is exact.
 - **One `isolatedNodes` capability, not `emptyGroups` + `orphans`:** the node type is unified (D1), so an empty group and an orphan item are the same isolated node.
 - **Capabilities may depend on params and the target format** (`capabilitiesFor(params, format)`): `nested` writes a shared node as YAML anchors (native) but as JSON copies (degrade).
@@ -58,4 +58,7 @@ metadata:
 - **`edge-rows` is polytag's canonical interchange** (§9's recommendation); in one CSV, a row with an empty `parent` is a node row (data, isolated nodes). JGF is `node-link`.
 - **Positional grammars emit fractional order keys**; round trips compare order by rank, and only where the source was ordered.
 - **Snapshots are structural** (`{ nodes, edges }` fitting zodal-groups' `Node` / `Edge`); `@zodal/groups-core` is a devDependency for the compatibility test only.
-- **Import is a plan first** (`planImport`: create / update / skip / conflict per id, by content hash), written by `applyImport` only when conflicts are resolved; export takes a `scope`.
+- **Import is a plan first** (`planImport`: create / update / skip / conflict per id, naming the changed fields), written by `applyImport` only when conflicts are resolved; export takes a `scope`. Only fields the incoming data carries are compared (absent = keep, updates merge); order is compared by rank among common siblings; equality is the exact canonical form (`stableStringify`, `NaN` ≠ `null`), never a short hash.
+- **Bounded output and input:** `nested` writes repeats as refs past `maxEntries` (copies of shared subtrees multiply) and members deeper than `maxDepth` as refs starting new roots; `readText` has `maxBytes`; walkers are iterative. Parse untrusted text in a Web Worker.
+- **CSV escapes formulas by default** (`escapeFormulae`): a reversible leading `'`, reported as an `encode`.
+- **The collection seam:** `ParseResult.records` (ids declared as records), `ParseResult.spaces` (further list fields as named spaces, record grammars' `spaces` param), `toCollectionSeed` / `fromCollectionSeed`. A second list field makes detection ask.

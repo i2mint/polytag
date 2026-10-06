@@ -21,6 +21,8 @@
  *    `import()`/`require()` whose argument is not a string literal (unless the line, or
  *    the one above, says `boundary-check: allow-dynamic`); in a dependency, a forbidden
  *    package among its dependencies, peerDependencies or optionalDependencies.
+ *    Also: a built file reached from a tag-agnostic entry whose source map lists a source file
+ *    only the tag-aware root reaches (root code hoisted into a shared chunk).
  * 2. Types: every `types` file the exports map names (each condition must have one),
  *    walked through relative and package imports and `/// <reference>` directives.
  *    Violations: a forbidden specifier or `/// <reference types>`; reaching the root's
@@ -122,7 +124,7 @@ function scanOwnFile(file) {
  * @param {string[]} [options.forbiddenFiles] Absolute files no entry may reach (the tag-aware root).
  * @param {string} [options.absWorkingDir]    Base for relative paths. Defaults to the repo root.
  * @param {string[]} [options.nodePaths]      Extra module directories (the tests' fixtures).
- * @returns {Promise<{entry: string, violations: {kind: string, path: string, from?: string}[]}[]>}
+ * @returns {Promise<{entry: string, violations: {kind: string, path: string, from?: string}[], reached: string[]}[]>}
  */
 export async function checkSources({
   entries,
@@ -184,7 +186,8 @@ export async function checkSources({
         violations.push(...dependencyViolations(pkgJson, isForbidden, rel));
       }
     }
-    results.push({ entry: rel(entryAbs), violations });
+    const reached = Object.keys(metafile.inputs).map((path) => resolve(absWorkingDir, path)).filter(isFile);
+    results.push({ entry: rel(entryAbs), violations, reached });
   }
   return results;
 }
@@ -361,11 +364,64 @@ export async function checkPackage(packageDir, { absWorkingDir = ROOT, nodePaths
     declarations.push(...types.map(inPkg));
   }
   if (errors.length) return { errors, results: [] };
+  const sourceResults = await checkSources({ entries: [...new Set(sources)], forbidden, forbiddenFiles, absWorkingDir, nodePaths });
+  const rootOnly = await rootOwnedSources(
+    aware.map((k) => inPkg(subpaths[k].source)).filter(isFile),
+    sourceResults.flatMap((r) => r.reached),
+    { absWorkingDir, nodePaths, packageDir },
+  );
+  const rel = (f) => toPosix(relative(absWorkingDir, f));
   const results = [
-    ...(await checkSources({ entries: [...new Set(sources)], forbidden, forbiddenFiles, absWorkingDir, nodePaths })),
+    ...sourceResults.map(({ entry, violations, reached }) => ({ entry, violations: [...violations, ...hoistedRootSources(reached, rootOnly, rel)] })),
     ...checkDeclarations({ entries: [...new Set(declarations)], forbidden, forbiddenFiles, absWorkingDir, compilerOptions }),
   ];
   return { errors, results };
+}
+
+/**
+ * The package's own source files that only the tag-aware root reaches: bundled from the
+ * root's sources, minus everything a tag-agnostic entry's sources reach.
+ */
+async function rootOwnedSources(rootSources, agnosticReached, { absWorkingDir, nodePaths, packageDir }) {
+  if (!rootSources.length) return new Set();
+  const agnostic = new Set(agnosticReached.map((f) => realpathOr(f)));
+  const own = (f) => !toPosix(relative(packageDir, f)).startsWith('..') && !toPosix(f).includes('/node_modules/');
+  const out = new Set();
+  for (const entry of rootSources) {
+    const { metafile } = await build({ entryPoints: [entry], absWorkingDir, nodePaths, bundle: true, write: false, metafile: true, platform: 'node', format: 'esm', logLevel: 'silent', ignoreAnnotations: true });
+    for (const path of Object.keys(metafile.inputs)) {
+      const abs = realpathOr(resolve(absWorkingDir, path));
+      if (isFile(abs) && own(abs) && !agnostic.has(abs) && !/\.(c|m)?js$/.test(abs)) out.add(abs);
+    }
+  }
+  return out;
+}
+
+/**
+ * Violations for built files (reached from a tag-agnostic entry) whose source map lists a
+ * root-owned source: root code hoisted into a shared chunk, which bundling alone cannot see
+ * (the chunk is the package's own file and imports nothing forbidden).
+ */
+function hoistedRootSources(reached, rootOnly, rel) {
+  if (!rootOnly.size) return [];
+  const violations = [];
+  for (const file of reached) {
+    const mapFile = `${file}.map`;
+    if (!/\.(c|m)?js$/.test(file) || !isFile(mapFile)) continue;
+    let map;
+    try {
+      map = readJson(mapFile);
+    } catch {
+      violations.push({ kind: 'unreadable source map', path: rel(mapFile) });
+      continue;
+    }
+    const base = resolve(dirname(mapFile), map.sourceRoot ?? '');
+    for (const source of map.sources ?? []) {
+      const abs = realpathOr(resolve(base, source));
+      if (rootOnly.has(abs)) violations.push({ kind: 'bundles root-owned source', path: rel(abs), from: rel(file) });
+    }
+  }
+  return violations;
 }
 
 function report({ errors, results }) {

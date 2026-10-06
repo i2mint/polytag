@@ -6,6 +6,7 @@
 
 import type { Table } from '../../formats/index.js';
 import type { SpaceBuilder } from './builder.js';
+import type { SnapshotNode } from '../../model/snapshot.js';
 import type { FlatRecord } from './flat.js';
 import { FAMILY_KEY, PAYLOAD_KEY } from './records.js';
 import { cellOf, columnIndex, familyCell, payloadCells, payloadColumns, readFamily, readPayload } from './table.js';
@@ -55,12 +56,13 @@ export function writeItemTable(
   records: readonly FlatRecord[],
   keys: { idKey: string; labelKey: string },
   membership: { readonly columns: readonly string[]; readonly cells: (r: FlatRecord) => readonly string[] },
+  { spreadable }: { readonly spreadable?: (nodes: readonly SnapshotNode[], columns: readonly string[]) => boolean } = {},
 ): { table: Table; payloadColumns: readonly string[] } {
   const nodes = records.map((r) => r.node);
   const hasLabel = nodes.some((n) => n.label !== undefined);
   const hasFamily = nodes.some((n) => n.family !== undefined);
   const base = [keys.idKey, ...(hasLabel ? [keys.labelKey] : []), ...(hasFamily ? [FAMILY_KEY] : [])];
-  const payload = payloadColumns(nodes, [...base, ...membership.columns]);
+  const payload = payloadColumns(nodes, [...base, ...membership.columns], spreadable && ((columns) => spreadable(nodes, columns)));
   const rows = records.map((r) => [
     r.node.id,
     ...(hasLabel ? [r.node.label ?? ''] : []),

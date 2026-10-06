@@ -35,6 +35,13 @@ export function isTable(value: unknown): value is Table {
   return Array.isArray(columns) && Array.isArray(rows) && rows.every(Array.isArray);
 }
 
+/** A non-fatal problem found while decoding (a duplicate JSON key), located by JSON pointer. */
+export interface FormatWarning {
+  readonly code: 'duplicate-key';
+  readonly message: string;
+  readonly pointer: string;
+}
+
 /**
  * A loaded format: a zodal `Codec<string, V>` whose `decode` parses text and whose `encode`
  * writes it. Both throw {@link FormatError}.
@@ -42,7 +49,22 @@ export function isTable(value: unknown): value is Table {
 export interface FormatCodec<V = unknown> extends Codec<string, V> {
   /** The id of the format this codec belongs to. */
   readonly format: string;
+  /** Non-fatal problems in a text that decodes (duplicate keys: JSON keeps the last). */
+  warnings?(text: string): readonly FormatWarning[];
+  /** The codec options that reproduce `text`'s dialect when writing (a CSV delimiter, a YAML version). */
+  dialect?(text: string): Record<string, unknown>;
 }
+
+/** Which values a format can hold. */
+export interface ValueLimits {
+  /** `null` (TOML has none). */
+  readonly null: boolean;
+  /** `NaN` and `±Infinity` (JSON writes them as `null`). */
+  readonly nonFinite: boolean;
+}
+
+/** Where something is in a decoded document: a JSON pointer into a value, or a row (1-based, header = 1) and column of a table. */
+export type Location = { readonly pointer: string } | { readonly row: number; readonly column?: string };
 
 /** The result of a cheap, library-free look at a text: how likely it is in this format, and why. */
 export interface FormatSniff {
@@ -80,11 +102,15 @@ export interface FormatDescriptor<V = unknown, O extends object = Record<string,
   sniff(text: string): FormatSniff;
   /** Comments and layout a full rewrite of `text` would lose. */
   inspect(text: string): FormattingInfo;
+  /** Which values it can hold; a writer removes or converts the rest first and reports it. */
+  readonly limits: ValueLimits;
   /**
    * JSON-pointer paths in `value` this format cannot write (TOML has no `null`). The codec
    * drops them on `encode`; callers report them as a loss.
    */
   unrepresentable(value: V): readonly string[];
+  /** Where `encode` (with these options) writes a value by a convention that `decode` undoes (a CSV formula escaped as `'=…`). */
+  escapes?(value: V, options?: O): readonly string[];
   /** Load the parser library (once) and return a codec bound to `options`. */
   load(options?: O): Promise<FormatCodec<V>>;
 }
@@ -99,6 +125,15 @@ export type FormatErrorCode =
   | 'shape'
   /** The value cannot be written at all (a circular structure in JSON, a BigInt). */
   | 'value';
+
+/** A {@link FormatError} as plain, serialisable data. */
+export interface FormatErrorInfo {
+  readonly format: string;
+  readonly code: FormatErrorCode;
+  readonly message: string;
+  readonly line?: number;
+  readonly column?: number;
+}
 
 /** A failure to decode or encode, with a 1-based position when the parser reports one. */
 export class FormatError extends Error {
@@ -120,6 +155,25 @@ export class FormatError extends Error {
     this.line = line;
     this.column = column;
   }
+
+  /** Plain data (an `Error`'s `message` is not enumerable, so `JSON.stringify` would lose it). */
+  toJSON(): FormatErrorInfo {
+    return {
+      format: this.format,
+      code: this.code,
+      message: this.message,
+      ...(this.line !== undefined ? { line: this.line } : {}),
+      ...(this.column !== undefined ? { column: this.column } : {}),
+    };
+  }
+}
+
+/**
+ * Is `error` a {@link FormatError}? Duck-typed, so it holds across bundles that each carry a
+ * copy of the class.
+ */
+export function isFormatError(error: unknown): error is FormatError {
+  return error instanceof FormatError || (error instanceof Error && error.name === 'FormatError' && typeof (error as FormatError).format === 'string');
 }
 
 /** The outcome of {@link tryDecode}: the value, or the error, never a throw. */
@@ -154,7 +208,43 @@ export function positionOf(text: string, offset: number): { line: number; column
   return { line, column: offset - lineStart + 1 };
 }
 
+/** How much of a text the sniffers look at, and the longest line they read. */
+export const SNIFF_CHARS = 64 * 1024;
+export const SNIFF_LINE = 1024;
+
+/** The first lines of a text for sniffing: at most {@link SNIFF_CHARS}, each cut to {@link SNIFF_LINE}. */
+export const sniffLines = (text: string): string[] =>
+  text
+    .slice(0, SNIFF_CHARS)
+    .replace(/^﻿/, '')
+    .split(/\r?\n/)
+    .map((l) => l.slice(0, SNIFF_LINE));
+
+const isSpace = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '﻿' || /\s/.test(c);
+
 /** The first non-whitespace character of `text` (after a BOM), or `''`. */
 export function firstChar(text: string): string {
-  return /^﻿?\s*(\S)/.exec(text)?.[1] ?? '';
+  const head = text.slice(0, SNIFF_CHARS);
+  for (const c of head) if (!isSpace(c)) return c;
+  return '';
+}
+
+/** The first character of `text` that is neither whitespace nor inside a `//` or block comment, or `''`. */
+export function firstCodeChar(text: string): string {
+  const head = text.slice(0, SNIFF_CHARS);
+  let i = 0;
+  while (i < head.length) {
+    const c = head[i]!;
+    if (isSpace(c)) i += 1;
+    else if (c === '/' && head[i + 1] === '/') {
+      const end = head.indexOf('\n', i);
+      if (end === -1) return '';
+      i = end + 1;
+    } else if (c === '/' && head[i + 1] === '*') {
+      const end = head.indexOf('*/', i + 2);
+      if (end === -1) return '';
+      i = end + 2;
+    } else return c;
+  }
+  return '';
 }

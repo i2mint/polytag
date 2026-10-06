@@ -50,11 +50,11 @@ export {
   type Reduction,
   type Support,
   formattingLosses,
+  limitValues,
   lossReport,
   reduce,
 } from './loss.js';
 export {
-  type AssessOptions,
   type DetectContext,
   type Detection,
   type Diagnostic,
@@ -66,13 +66,13 @@ export {
   type Residue,
   type SerialiseContext,
   type SerialiseResult,
-  assess,
   defineGrammar,
   noDetection,
 } from './grammar.js';
 export * from './grammars/index.js';
 export { type DetectOptions, type Detected, type GrammarCandidate, type Preview, detect, previewOf } from './detect.js';
 export {
+  type AssessOptions,
   type ExportChoice,
   type IoOptions,
   type ReadOptions,
@@ -80,6 +80,9 @@ export {
   type RoundTrip,
   type WriteOptions,
   type WriteResult,
+  DEFAULT_MAX_BYTES,
+  assess,
+  exceedsBytes,
   exportChoices,
   formatDiagnostic,
   grammarCodec,
@@ -94,7 +97,9 @@ export {
   type ConflictResolution,
   type ImportAction,
   type ImportDelta,
+  type ImportField,
   type ImportPlan,
+  type PlanOptions,
   type PlanEntry,
   applyImport,
   edgeHash,
@@ -102,3 +107,4 @@ export {
   planImport,
 } from './import-plan.js';
 export { type ExportScope, type ScopeOptions, scopeSpace } from './scope.js';
+export { type CollectionSeed, type SeedOptions, fromCollectionSeed, toCollectionSeed } from './collection-seed.js';

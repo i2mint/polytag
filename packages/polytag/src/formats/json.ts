@@ -1,10 +1,11 @@
 /**
  * JSON and JSONC formats.
  *
- * JSON needs no library (`JSON.parse`). JSONC (comments, trailing commas) is read with
- * `jsonc-parser`, loaded only when a JSONC document is actually decoded; writing JSONC
- * writes plain JSON, so its comments are a `formatting` loss (comment-preserving edits are a
- * later seam, formats-and-grammars §8.3).
+ * JSON decodes with `JSON.parse`; JSONC (comments, trailing commas) with `jsonc-parser`'s
+ * tree. Both use that tree (loaded on first use, 5.7 kB gzip) to report duplicate keys,
+ * which `JSON.parse` silently resolves to the last (RFC 8259: implementations differ), and
+ * to locate a JSON pointer in the text. Writing JSONC writes plain JSON, so its comments are
+ * a `formatting` loss (comment-preserving edits are a later seam, formats-and-grammars §8.3).
  *
  * extraction candidate: a zodal format package (second consumer: zodal-dials TOML/YAML stores)
  */
@@ -15,9 +16,11 @@ import {
   type FormatDescriptor,
   FormatError,
   type FormatSniff,
+  type FormatWarning,
   asFormatError,
-  firstChar,
+  firstCodeChar,
   positionOf,
+  SNIFF_CHARS,
 } from './types.js';
 import { findPaths } from './values.js';
 
@@ -52,7 +55,82 @@ function strictParse(text: string): { ok: true; value: unknown } | { ok: false; 
   }
 }
 
-/** JSON: `JSON.parse` / `JSON.stringify`, no library. */
+type JsoncParser = typeof import('jsonc-parser');
+type JsonNode = import('jsonc-parser').Node;
+let jsoncParser: Promise<JsoncParser> | undefined;
+/** Load `jsonc-parser` once. */
+export const loadJsoncParser = (): Promise<JsoncParser> =>
+  (jsoncParser ??= import('jsonc-parser').then((m) => ((m as { default?: JsoncParser }).default ?? m) as JsoncParser));
+
+/**
+ * A value from a `jsonc-parser` tree. Built here rather than with its `parse`, which assigns
+ * keys (`obj[key] = v`), so a `"__proto__"` key would set the prototype instead of being a
+ * key. A duplicate key keeps the last value, as `JSON.parse` does.
+ */
+function valueOf(root: JsonNode): unknown {
+  const build = (node: JsonNode): unknown => {
+    if (node.type === 'array') return (node.children ?? []).map(build);
+    if (node.type !== 'object') return node.value;
+    const out: Record<string, unknown> = {};
+    for (const property of node.children ?? []) {
+      const [key, value] = property.children ?? [];
+      if (!key || !value) continue;
+      Object.defineProperty(out, key.value as string, { value: build(value), enumerable: true, writable: true, configurable: true });
+    }
+    return out;
+  };
+  return build(root);
+}
+
+const pointerSegment = (key: string | number): string => String(key).replace(/~/g, '~0').replace(/\//g, '~1');
+
+/** Duplicate keys in a tree, as warnings located by JSON pointer (iterative: deep documents are fine). */
+function duplicateKeys(root: JsonNode | undefined): FormatWarning[] {
+  const out: FormatWarning[] = [];
+  const stack: [JsonNode, string][] = root ? [[root, '']] : [];
+  while (stack.length) {
+    const [node, path] = stack.pop()!;
+    if (node.type === 'array') (node.children ?? []).forEach((c, i) => stack.push([c, `${path}/${i}`]));
+    if (node.type !== 'object') continue;
+    const seen = new Set<string>();
+    for (const property of node.children ?? []) {
+      const [key, value] = property.children ?? [];
+      if (!key) continue;
+      const k = key.value as string;
+      const at = `${path}/${pointerSegment(k)}`;
+      if (seen.has(k)) out.push({ code: 'duplicate-key', message: `duplicate key '${k}'; the last value is kept (JSON parsers differ)`, pointer: at });
+      seen.add(k);
+      if (value) stack.push([value, at]);
+    }
+  }
+  return out.reverse();
+}
+
+/** The offset of the value a JSON pointer names in a jsonc-parser tree, or `undefined`. */
+export function jsonOffset(root: JsonNode | undefined, pointer: string): number | undefined {
+  if (!root) return undefined;
+  let node: JsonNode | undefined = root;
+  const segments = pointer === '' ? [] : pointer.slice(1).split('/').map((s) => s.replace(/~1/g, '/').replace(/~0/g, '~'));
+  for (const seg of segments) {
+    if (!node) return undefined;
+    if (node.type === 'array') node = node.children?.[Number(seg)];
+    else if (node.type === 'object') {
+      const matches: JsonNode[] = (node.children ?? []).filter((p) => p.children?.[0]?.value === seg);
+      node = matches.at(-1)?.children?.[1];
+    } else return undefined;
+  }
+  return node?.offset;
+}
+
+/** The parse tree of a JSON / JSONC text (for locating pointers). */
+export async function jsonTree(text: string): Promise<JsonNode | undefined> {
+  const lib = await loadJsoncParser();
+  return lib.parseTree(text, [], { allowTrailingComma: true, disallowComments: false });
+}
+
+const VALUE_LIMITS = { null: true, nonFinite: false } as const;
+
+/** JSON: `JSON.parse` / `JSON.stringify`. */
 export const json: FormatDescriptor<unknown, JsonOptions> = {
   id: 'json',
   label: 'JSON',
@@ -60,58 +138,34 @@ export const json: FormatDescriptor<unknown, JsonOptions> = {
   mediaTypes: ['application/json'],
   kind: 'value',
   rootArray: true,
+  limits: VALUE_LIMITS,
   sniff(text): FormatSniff {
-    const c = firstChar(text);
+    const c = firstCodeChar(text);
     if (c !== '{' && c !== '[') return { score: 0, evidence: [] };
-    if (strictParse(text).ok) return { score: 0.95, evidence: [`starts with '${c}' and JSON.parse succeeds`] };
+    if (text.length <= SNIFF_CHARS * 16 && strictParse(text).ok) return { score: 0.95, evidence: [`starts with '${c}' and JSON.parse succeeds`] };
+    if (text.length > SNIFF_CHARS * 16) return { score: 0.6, evidence: [`starts with '${c}' (too long to parse while sniffing)`] };
     return { score: 0.3, evidence: [`starts with '${c}' but JSON.parse fails`] };
   },
   inspect: () => ({ comments: [] }),
   unrepresentable: (value) => findPaths(value, notJson),
   async load({ indent = DEFAULT_INDENT } = {}): Promise<FormatCodec> {
+    const lib = await loadJsoncParser();
     return {
       format: 'json',
       decode(text) {
         const parsed = strictParse(text);
         if (parsed.ok) return parsed.value;
         const message = parsed.error instanceof Error ? parsed.error.message : String(parsed.error);
-        const offset = /position (\d+)/.exec(message)?.[1];
-        throw new FormatError('json', message, {
-          cause: parsed.error,
-          ...(offset !== undefined ? positionOf(text, Number(offset)) : {}),
-        });
+        const errors: import('jsonc-parser').ParseError[] = [];
+        lib.parseTree(text, errors, { allowTrailingComma: false, disallowComments: true });
+        const offset = errors[0]?.offset ?? Number(/position (\d+)/.exec(message)?.[1] ?? Number.NaN);
+        throw new FormatError('json', message, { cause: parsed.error, ...(Number.isFinite(offset) ? positionOf(text, offset) : {}) });
       },
       encode: (value) => encodeJson('json', value, indent),
+      warnings: (text) => duplicateKeys(lib.parseTree(text, [], { allowTrailingComma: false })),
     };
   },
 };
-
-type JsoncParser = typeof import('jsonc-parser');
-
-/**
- * A value from a `jsonc-parser` tree. Built here rather than with its `parse`, which assigns
- * keys (`obj[key] = v`), so a `"__proto__"` key would set the prototype instead of being a key.
- */
-function valueOf(node: import('jsonc-parser').Node): unknown {
-  switch (node.type) {
-    case 'object': {
-      const out: Record<string, unknown> = {};
-      for (const property of node.children ?? []) {
-        const [key, value] = property.children ?? [];
-        if (!key || !value) continue;
-        Object.defineProperty(out, key.value as string, { value: valueOf(value), enumerable: true, writable: true, configurable: true });
-      }
-      return out;
-    }
-    case 'array':
-      return (node.children ?? []).map(valueOf);
-    default:
-      return node.value;
-  }
-}
-let jsoncParser: Promise<JsoncParser> | undefined;
-const loadJsoncParser = (): Promise<JsoncParser> =>
-  (jsoncParser ??= import('jsonc-parser').then((m) => ((m as { default?: JsoncParser }).default ?? m) as JsoncParser));
 
 /** JSONC: JSON with comments and trailing commas, read with `jsonc-parser`; written as plain JSON. */
 export const jsonc: FormatDescriptor<unknown, JsonOptions> = {
@@ -121,31 +175,35 @@ export const jsonc: FormatDescriptor<unknown, JsonOptions> = {
   mediaTypes: ['application/jsonc'],
   kind: 'value',
   rootArray: true,
+  limits: VALUE_LIMITS,
   sniff(text): FormatSniff {
-    const c = firstChar(text);
+    const c = firstCodeChar(text);
     if (c !== '{' && c !== '[') return { score: 0, evidence: [] };
-    if (strictParse(text).ok) return { score: 0.5, evidence: ['valid JSON (JSONC is a superset; JSON preferred)'] };
+    const head = text.slice(0, SNIFF_CHARS);
     const evidence: string[] = [];
-    if (slashComments(text).length) evidence.push('has // or /* */ comments');
-    if (TRAILING_COMMA.test(text)) evidence.push('has trailing commas');
-    return evidence.length ? { score: 0.85, evidence } : { score: 0.2, evidence: [`starts with '${c}' but JSON.parse fails`] };
+    if (slashComments(head).length) evidence.push('has // or /* */ comments');
+    if (TRAILING_COMMA.test(head)) evidence.push('has trailing commas');
+    if (evidence.length) return { score: 0.85, evidence };
+    return { score: 0.5, evidence: ['looks like JSON (JSONC is a superset; JSON preferred)'] };
   },
   inspect: (text) => ({ comments: slashComments(text) }),
   unrepresentable: (value) => findPaths(value, notJson),
   async load({ indent = DEFAULT_INDENT } = {}): Promise<FormatCodec> {
     const lib = await loadJsoncParser();
+    const parse = (text: string): { tree: JsonNode | undefined; errors: import('jsonc-parser').ParseError[] } => {
+      const errors: import('jsonc-parser').ParseError[] = [];
+      return { tree: lib.parseTree(text, errors, { allowTrailingComma: true, disallowComments: false }), errors };
+    };
     return {
       format: 'jsonc',
       decode(text) {
-        const errors: import('jsonc-parser').ParseError[] = [];
-        const tree = lib.parseTree(text, errors, { allowTrailingComma: true, disallowComments: false });
+        const { tree, errors } = parse(text);
         const [first] = errors;
-        if (first) {
-          throw new FormatError('jsonc', lib.printParseErrorCode(first.error), positionOf(text, first.offset));
-        }
+        if (first) throw new FormatError('jsonc', lib.printParseErrorCode(first.error), positionOf(text, first.offset));
         return tree ? valueOf(tree) : undefined;
       },
       encode: (value) => encodeJson('jsonc', value, indent),
+      warnings: (text) => duplicateKeys(parse(text).tree),
     };
   },
 };

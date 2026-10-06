@@ -10,7 +10,7 @@
  * disagree; the round-trip gate checks `parse(serialise(S)) ≅ reduce(S).space`.
  */
 
-import type { AnyFormat } from './formats/index.js';
+import { type AnyFormat, type ValueLimits, isPlainObject } from './formats/index.js';
 import { defaultIsMembership, groupIds, hasNodeMeta, type MembershipTest } from './model/features.js';
 import { CONTAINS, type SnapshotEdge, type SnapshotNode, type SpaceSnapshot, edgeIdMinter } from './model/snapshot.js';
 
@@ -58,6 +58,8 @@ export interface GrammarCapabilities {
   readonly identity: 'id' | 'path' | 'token';
   /** Severity of each `convention` feature. Default `encode`. */
   readonly conventionSeverity?: Partial<Record<ConventionFeature, 'encode' | 'degrade'>>;
+  /** How each `convention` feature is written, appended to its loss message. */
+  readonly conventionNote?: Partial<Record<ConventionFeature, string>>;
 }
 
 /** What is lost. Named after the feature; the severity says how. */
@@ -140,6 +142,7 @@ const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n =
 export function reduce(space: SpaceSnapshot, caps: GrammarCapabilities, { isMembership = defaultIsMembership }: ReduceOptions = {}): Reduction {
   const losses: Loss[] = [];
   const severity = (f: ConventionFeature): LossSeverity => caps.conventionSeverity?.[f] ?? 'encode';
+  const note = (f: ConventionFeature): string => (caps.conventionNote?.[f] ? ` (${caps.conventionNote[f]})` : '');
   let nodes: SnapshotNode[] = [...space.nodes];
   let edges: SnapshotEdge[] = [...space.edges];
   const without = (drop: Set<string>): void => {
@@ -183,7 +186,7 @@ export function reduce(space: SpaceSnapshot, caps: GrammarCapabilities, { isMemb
       losses.push(loss(kind, 'drop', dropped, `${plural(dropped.length, 'membership')} beyond each ${what}'s first group cannot be written`));
       without(new Set(dropped));
     } else if (cap === 'convention') {
-      losses.push(loss(kind, severity(feature), [...multi], `${plural(multi.size, `${what} in several groups`, `${what}s in several groups`)}, written by convention`));
+      losses.push(loss(kind, severity(feature), [...multi], `${plural(multi.size, `${what} in several groups`, `${what}s in several groups`)}, written by convention${note(feature)}`));
     }
   };
   if (caps.nestedGroups !== 'no') multiParent(true, caps.groupsMultiParent, 'group-multi-parent', 'groupsMultiParent');
@@ -276,4 +279,67 @@ export function formattingLosses({ text, format }: PreviousText): Loss[] {
     loss('formatting', 'drop', comments.map((c) => `line ${c.line}`), `${plural(comments.length, 'comment')} in the existing ${format.label} file would be lost`),
     loss('formatting', 'degrade', ['layout'], `key order, whitespace and quoting of the existing ${format.label} file would be rewritten`),
   ];
+}
+
+const DROP = Symbol('drop');
+
+/**
+ * Fit the payloads and edge metadata of `space` to what a format can hold: without `null`
+ * (TOML), nulls are left out (`format-value` drop); without non-finite numbers (JSON, and
+ * CSV's JSON cells), `NaN` and `±Infinity` become `null` (`format-value` degrade). Ids are
+ * the nodes and edges affected. Pure.
+ */
+export function limitValues(space: SpaceSnapshot, limits: ValueLimits): Reduction {
+  if (limits.null && limits.nonFinite) return { space, losses: [] };
+  let dropped = false;
+  let converted = false;
+  const fit = (v: unknown): unknown => {
+    if (v === null) {
+      if (limits.null) return v;
+      dropped = true;
+      return DROP;
+    }
+    if (typeof v === 'number' && !Number.isFinite(v) && !limits.nonFinite) {
+      if (limits.null) {
+        converted = true;
+        return null;
+      }
+      dropped = true;
+      return DROP;
+    }
+    if (Array.isArray(v)) return v.map(fit).filter((x) => x !== DROP);
+    if (isPlainObject(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, fit(x)] as const).filter(([, x]) => x !== DROP));
+    return v;
+  };
+  const droppedIds: string[] = [];
+  const convertedIds: string[] = [];
+  const track = (id: string): void => {
+    if (dropped) droppedIds.push(id);
+    if (converted) convertedIds.push(id);
+    dropped = false;
+    converted = false;
+  };
+  const nodes = space.nodes.map((n) => {
+    if (n.payload === undefined) return n;
+    const payload = fit(n.payload);
+    track(n.id);
+    if (payload === DROP) {
+      const { payload: _, ...rest } = n;
+      return rest;
+    }
+    return payload === n.payload ? n : { ...n, payload };
+  });
+  const edges = space.edges.map((e) => {
+    if (e.meta === undefined) return e;
+    const meta = fit(e.meta);
+    track(e.id);
+    return { ...e, meta: meta as Record<string, unknown> };
+  });
+  return {
+    space: { nodes, edges },
+    losses: [
+      loss('format-value', 'drop', droppedIds, `${plural(droppedIds.length, 'node or edge', 'nodes or edges')} hold null, which this format cannot write; left out`),
+      loss('format-value', 'degrade', convertedIds, `${plural(convertedIds.length, 'node or edge', 'nodes or edges')} hold NaN or Infinity, written as null`),
+    ],
+  };
 }

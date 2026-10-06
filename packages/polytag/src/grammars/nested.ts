@@ -23,11 +23,11 @@
 
 import { z } from 'zod';
 import { isPlainObject } from '../formats/index.js';
-import { type Detection, defineGrammar, noDetection } from '../grammar.js';
-import type { GrammarCapabilities } from '../loss.js';
+import { type Detection, defineGrammar, noDetection, type SerialiseContext } from '../grammar.js';
+import { type GrammarCapabilities, loss } from '../loss.js';
 import { hasNodeMeta } from '../model/features.js';
-import { type SnapshotEdge, type SnapshotNode, compareOrder, positionalOrders } from '../model/snapshot.js';
-import { createSpaceBuilder } from './shared/builder.js';
+import { CONTAINS, type SnapshotEdge, type SnapshotNode, type SpaceSnapshot, compareOrder, positionalOrders } from '../model/snapshot.js';
+import { createSpaceBuilder, seg } from './shared/builder.js';
 import { coerceString, hasOwn, own, readNodeData, type RecordLayout, writeRecord } from './shared/records.js';
 import { LEXICON, inLexicon, isScalar, recordArray } from './shared/shape.js';
 
@@ -44,6 +44,18 @@ export const nestedParams = z.object({
   rootKey: z.string().min(1).default('tree'),
   /** Read array position as the rank within the parent. */
   order: z.boolean().default(true),
+  /**
+   * Most entries a copying write (`shared` outside YAML, `duplicate`) may produce: copies of a
+   * shared subtree multiply (a diamond of 20 levels is a million entries). Past it, repeats
+   * are written as `ref`s, and the loss report says so.
+   */
+  maxEntries: z.number().int().positive().default(50_000),
+  /**
+   * Deepest nesting written. A member deeper than this is written as a `ref` and started as
+   * its own root entry (parsers and stringifiers recurse; JSON.stringify overflows near a few
+   * thousand levels). Reads back exactly; reported as an `encode`.
+   */
+  maxDepth: z.number().int().min(1).default(500),
 });
 export type NestedParams = z.infer<typeof nestedParams>;
 
@@ -62,10 +74,56 @@ const BASE: GrammarCapabilities = {
   identity: 'id',
 };
 
-function capabilities(p: NestedParams, format?: string): GrammarCapabilities {
+/** Does writing `space` with copies produce more than `p.maxEntries` entries? Counts by walking, and stops at the budget. */
+function copiesExceed(space: SpaceSnapshot, p: NestedParams): number | undefined {
+  const edges = space.edges.filter((e) => e.kind === CONTAINS);
+  const out = new Map<string, string[]>();
+  const hasParent = new Set<string>();
+  for (const e of edges) {
+    out.set(e.parent, [...(out.get(e.parent) ?? []), e.child]);
+    hasParent.add(e.child);
+  }
+  let count = 0;
+  const visited = new Set<string>();
+  const starts = [...space.nodes.filter((n) => !hasParent.has(n.id)).map((n) => n.id), ...space.nodes.map((n) => n.id)];
+  for (const start of starts) {
+    if (visited.has(start)) continue;
+    const frames: { id: string; kids: string[]; i: number }[] = [{ id: start, kids: out.get(start) ?? [], i: 0 }];
+    const onPath = new Set([start]);
+    count += 1;
+    visited.add(start);
+    while (frames.length) {
+      if (count > p.maxEntries) return count;
+      const f = frames[frames.length - 1]!;
+      if (f.i >= f.kids.length) {
+        onPath.delete(f.id);
+        frames.pop();
+        continue;
+      }
+      const child = f.kids[f.i++]!;
+      count += 1;
+      visited.add(child);
+      if (onPath.has(child) || !out.has(child)) continue;
+      onPath.add(child);
+      frames.push({ id: child, kids: out.get(child)!, i: 0 });
+    }
+  }
+  return undefined;
+}
+
+/** How a node in several groups is actually written: copies past the budget become refs. */
+function effectiveMode(p: NestedParams, format: string | undefined, space: SpaceSnapshot | undefined): { mode: NestedParams['multiParent']; note?: string } {
+  const copies = p.multiParent === 'duplicate' || (p.multiParent === 'shared' && format !== 'yaml');
+  if (!copies || !space) return { mode: p.multiParent };
+  const n = copiesExceed(space, p);
+  return n === undefined ? { mode: p.multiParent } : { mode: 'ref', note: `as { ${p.refKey} } entries: copies would exceed maxEntries ${p.maxEntries}` };
+}
+
+function capabilities(p: NestedParams, format?: string, space?: SpaceSnapshot): GrammarCapabilities {
   const caps: GrammarCapabilities = { ...BASE, edgeOrder: p.order ? 'group-major' : 'no' };
-  if (p.multiParent === 'shared' && format === 'yaml') return { ...caps, itemsMultiParent: 'native', groupsMultiParent: 'native' };
-  if (p.multiParent === 'ref') return caps;
+  const { mode, note } = effectiveMode(p, format, space);
+  if (mode === 'shared' && format === 'yaml') return { ...caps, itemsMultiParent: 'native', groupsMultiParent: 'native' };
+  if (mode === 'ref') return note ? { ...caps, conventionNote: { itemsMultiParent: note, groupsMultiParent: note } } : caps;
   return { ...caps, conventionSeverity: { itemsMultiParent: 'degrade', groupsMultiParent: 'degrade' } };
 }
 
@@ -73,15 +131,16 @@ function capabilities(p: NestedParams, format?: string): GrammarCapabilities {
 function objectsIn(entries: readonly unknown[]): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
   const seen = new Set<object>();
-  const walk = (v: unknown): void => {
-    if (Array.isArray(v)) v.forEach(walk);
+  const stack: unknown[] = [entries];
+  while (stack.length) {
+    const v = stack.pop();
+    if (Array.isArray(v)) for (let i = v.length - 1; i >= 0; i--) stack.push(v[i]);
     else if (isPlainObject(v) && !seen.has(v)) {
       seen.add(v);
       out.push(v);
-      for (const x of Object.values(v)) if (Array.isArray(x)) walk(x);
+      for (const x of Object.values(v)) if (Array.isArray(x)) stack.push(x);
     }
-  };
-  walk(entries);
+  }
   return out;
 }
 
@@ -112,7 +171,99 @@ function detect(input: unknown, ctx: { text?: string }): Detection<NestedParams>
     ...(anchors ? ['YAML anchors and aliases: polyhierarchy by reference (a2)'] : []),
   ];
   const suggested: Partial<NestedParams> = { idKey, childrenKey, ...(found.key ? { rootKey: found.key } : {}) };
-  return { score: 0.5 * structural + 0.3 * name + 0.2 * (anchors ? 1 : withId), evidence, suggestedParams: suggested };
+  const ambiguity = inLexicon(childrenKey, LEXICON.children) || nestsObjects ? [] : [`'${childrenKey}' is not a children-like field name and holds no nested entries: are its values members or payload?`];
+  return { score: 0.5 * structural + 0.3 * name + 0.2 * (anchors ? 1 : withId), evidence, suggestedParams: suggested, ambiguity };
+}
+
+/**
+ * Lay out a (planned) space as a tree of entries. Iterative post-order build, so a deep
+ * hierarchy does not overflow the stack; past `maxDepth` a member is written as a ref and
+ * started as its own root. Returns the root entries and the edges written that way.
+ */
+function layout(space: SpaceSnapshot, p: NestedParams, ctx: SerialiseContext): { roots: unknown[]; deferred: string[] } {
+    const layout: RecordLayout = { idKey: p.idKey, labelKey: p.labelKey, structural: [p.childrenKey, p.refKey] };
+    const nodes = new Map(space.nodes.map((n) => [n.id, n]));
+    const out = new Map<string, SnapshotEdge[]>();
+    const hasParent = new Set<string>();
+    space.edges.forEach((e) => {
+      const list = out.get(e.parent);
+      if (list) list.push(e);
+      else out.set(e.parent, [e]);
+      hasParent.add(e.child);
+    });
+    const childrenOf = (id: string): SnapshotEdge[] =>
+      (out.get(id) ?? []).map((e, i) => ({ e, i })).sort((a, b) => compareOrder(a.e.order, b.e.order) || a.i - b.i).map(({ e }) => e);
+    const rendered = new Map<string, unknown>();
+    const reached = new Set<string>();
+    const { mode } = effectiveMode(p, ctx.format, space);
+    const ref = (id: string): unknown => Object.fromEntries([[p.refKey, id]]);
+    const onPath = new Set<string>();
+
+    /** A value that needs no expansion, or `undefined` when the node must be expanded. */
+    const immediate = (id: string): unknown => {
+      reached.add(id);
+      const node: SnapshotNode = nodes.get(id) ?? { id };
+      if (!out.has(id) && !hasNodeMeta(node)) return id;
+      if (onPath.has(id)) return ref(id);
+      if (rendered.has(id)) {
+        if (mode === 'shared') return rendered.get(id);
+        if (mode === 'ref') return ref(id);
+      }
+      return undefined;
+    };
+    type Frame = { id: string; kids: SnapshotEdge[]; i: number; values: unknown[] };
+    const open = (id: string): Frame => {
+      onPath.add(id);
+      return { id, kids: childrenOf(id), i: 0, values: [] };
+    };
+    const close = (f: Frame): unknown => {
+      onPath.delete(f.id);
+      const node: SnapshotNode = nodes.get(f.id) ?? { id: f.id };
+      const record = writeRecord(node, layout, f.kids.length ? [[p.childrenKey, f.values]] : []);
+      if (!rendered.has(f.id)) rendered.set(f.id, record);
+      return record;
+    };
+    // Iterative post-order build: a deep hierarchy does not overflow the stack.
+    const render = (root: string): unknown => {
+      const now = immediate(root);
+      if (now !== undefined) return now;
+      const frames: Frame[] = [open(root)];
+      for (;;) {
+        const f = frames[frames.length - 1]!;
+        if (f.i < f.kids.length) {
+          const edge = f.kids[f.i++]!;
+          const v = immediate(edge.child);
+          if (v !== undefined) f.values.push(v);
+          else if (frames.length >= p.maxDepth) {
+            // Too deep to nest: a ref here, and the member starts its own root entry.
+            f.values.push(ref(edge.child));
+            deferred.push(edge.id);
+            queue.push(edge.child);
+          } else frames.push(open(edge.child));
+          continue;
+        }
+        const value = close(frames.pop()!);
+        if (!frames.length) return value;
+        frames[frames.length - 1]!.values.push(value);
+      }
+    };
+
+    const deferred: string[] = [];
+    const queue: string[] = [];
+    const roots: unknown[] = space.nodes.filter((n) => !hasParent.has(n.id)).map((n) => render(n.id));
+    const drain = (): void => {
+      while (queue.length) {
+        const id = queue.shift()!;
+        if (!rendered.has(id)) roots.push(render(id));
+      }
+    };
+    drain();
+    // Nodes only reachable through a cycle: start one where the cycle is entered.
+    for (const n of space.nodes) {
+      if (!reached.has(n.id)) roots.push(render(n.id));
+      drain();
+    }
+    return { roots, deferred };
 }
 
 /** `nested`: a tree of entries with children arrays. */
@@ -136,8 +287,8 @@ export const nested = defineGrammar<NestedParams>({
     if (single) entries = [input];
     else if (found) {
       entries = found.array;
-      base = found.key !== undefined ? `/${found.key}` : '';
-      for (const [k, v] of found.rest) builder.leftover(`/${k}`, v);
+      base = found.key !== undefined ? `/${seg(found.key)}` : '';
+      for (const [k, v] of found.rest) builder.leftover(`/${seg(k)}`, v);
     } else {
       builder.diag({ severity: 'error', code: 'shape', message: 'expected a list of entries (ids or objects with children)', path: '' });
       builder.leftover('', input);
@@ -171,61 +322,81 @@ export const nested = defineGrammar<NestedParams>({
       else childLists.set(parent, [id]);
     };
 
-    const visit = (entry: unknown, path: string, parent?: { id: string; owner: object }): void => {
+    /** One entry: handle it, and return a frame when its children must be visited. */
+    type Frame = { entry: Record<string, unknown>; id: string; children: unknown[]; path: string; i: number };
+    const visit = (entry: unknown, path: string, parent?: { id: string; owner: object }): Frame | undefined => {
       if (entry === null || entry === undefined) {
         builder.diag({ severity: 'info', code: 'empty-token', message: 'an empty entry was skipped', path });
-        return;
+        return undefined;
       }
-      if (isScalar(entry)) {
+      if (isScalar(entry) || entry instanceof Date) {
         const id = coerceString(entry, 'id', path, builder)!;
         defined.add(id);
         builder.node(id);
         if (parent) link(parent.id, id, parent.owner, path);
-        return;
+        return undefined;
       }
       if (!isPlainObject(entry)) {
         builder.diag({ severity: 'warning', code: 'shape', message: 'not an entry (an id or an object); skipped', path });
         builder.leftover(path, entry);
-        return;
+        return undefined;
       }
       const seenId = visited.get(entry);
       if (seenId !== undefined) {
         // A shared object (YAML alias): one node; on the stack, a cycle.
         if (parent) link(parent.id, seenId, parent.owner, path);
-        return;
+        return undefined;
       }
       if (hasOwn(entry, p.refKey) && !hasOwn(entry, p.idKey)) {
-        const id = coerceString(own(entry, p.refKey), 'reference', `${path}/${p.refKey}`, builder);
+        const id = coerceString(own(entry, p.refKey), 'reference', `${path}/${seg(p.refKey)}`, builder);
         if (id === undefined) {
           builder.diag({ severity: 'warning', code: 'shape', message: `'${p.refKey}' is not an id; skipped`, path });
-          return;
+          return undefined;
         }
         refs.push({ id, path });
         if (parent) link(parent.id, id, parent.owner, path);
         else builder.node(id);
-        return;
+        return undefined;
       }
-      const id = coerceString(own(entry, p.idKey), 'id', `${path}/${p.idKey}`, builder);
+      const id = coerceString(own(entry, p.idKey), 'id', `${path}/${seg(p.idKey)}`, builder);
       if (id === undefined) {
         builder.diag({ severity: 'error', code: 'missing-id', message: `entry has no '${p.idKey}'; skipped with its children`, path, hint: 'set the idKey param' });
         builder.leftover(path, entry);
-        return;
+        return undefined;
       }
       visited.set(entry, id);
       defined.add(id);
       builder.node(id, readNodeData(entry, layout, path, builder), path);
       if (parent) link(parent.id, id, parent.owner, path);
       const children = own(entry, p.childrenKey);
-      if (children === undefined) return;
+      if (children === undefined) return undefined;
       if (!Array.isArray(children)) {
         builder.diag({ severity: 'warning', code: 'ignored-field', message: `'${p.childrenKey}' is not a list; ignored`, path, ids: [id] });
-        return;
+        return undefined;
       }
-      onStack.add(entry);
-      children.forEach((c, i) => visit(c, `${path}/${p.childrenKey}/${i}`, { id, owner: entry }));
-      onStack.delete(entry);
+      return { entry, id, children, path: `${path}/${seg(p.childrenKey)}`, i: 0 };
     };
-    entries.forEach((e, i) => visit(e, `${base}/${i}`));
+    // Iterative depth-first walk: a deep tree does not overflow the stack.
+    entries.forEach((e, i) => {
+      const first = visit(e, `${base}/${i}`);
+      if (!first) return;
+      const frames: Frame[] = [first];
+      onStack.add(first.entry);
+      while (frames.length) {
+        const f = frames[frames.length - 1]!;
+        if (f.i >= f.children.length) {
+          onStack.delete(f.entry);
+          frames.pop();
+          continue;
+        }
+        const index = f.i++;
+        const next = visit(f.children[index], `${f.path}/${index}`, { id: f.id, owner: f.entry });
+        if (next) {
+          onStack.add(next.entry);
+          frames.push(next);
+        }
+      }
+    });
 
     for (const { id, path } of refs) {
       if (!defined.has(id)) builder.diag({ severity: 'warning', code: 'unresolved-ref', message: `reference to '${id}', which is never defined; a bare node is created`, path, ids: [id] });
@@ -239,42 +410,16 @@ export const nested = defineGrammar<NestedParams>({
     return builder.build();
   },
 
-  write(space, p, ctx) {
-    const layout: RecordLayout = { idKey: p.idKey, labelKey: p.labelKey, structural: [p.childrenKey, p.refKey] };
-    const nodes = new Map(space.nodes.map((n) => [n.id, n]));
-    const out = new Map<string, SnapshotEdge[]>();
-    const hasParent = new Set<string>();
-    space.edges.forEach((e) => {
-      const list = out.get(e.parent);
-      if (list) list.push(e);
-      else out.set(e.parent, [e]);
-      hasParent.add(e.child);
-    });
-    const childrenOf = (id: string): SnapshotEdge[] =>
-      (out.get(id) ?? []).map((e, i) => ({ e, i })).sort((a, b) => compareOrder(a.e.order, b.e.order) || a.i - b.i).map(({ e }) => e);
-    const rendered = new Map<string, unknown>();
-    const reached = new Set<string>();
-
-    const render = (id: string, stack: ReadonlySet<string>): unknown => {
-      reached.add(id);
-      const node: SnapshotNode = nodes.get(id) ?? { id };
-      const kids = childrenOf(id);
-      if (!kids.length && !hasNodeMeta(node)) return id;
-      if (stack.has(id)) return Object.fromEntries([[p.refKey, id]]);
-      if (rendered.has(id)) {
-        if (p.multiParent === 'shared') return rendered.get(id);
-        if (p.multiParent === 'ref') return Object.fromEntries([[p.refKey, id]]);
-      }
-      const inner = new Set(stack).add(id);
-      const structural: [string, unknown][] = kids.length ? [[p.childrenKey, kids.map((e) => render(e.child, inner))]] : [];
-      const record = writeRecord(node, layout, structural);
-      if (!rendered.has(id)) rendered.set(id, record);
-      return record;
+  plan(space, p, ctx) {
+    const { deferred } = layout(space, p, ctx);
+    return {
+      space,
+      losses: [loss('group-edges', 'encode', deferred, `${deferred.length} membership(s) deeper than maxDepth ${p.maxDepth} are written as { ${p.refKey} } entries, their member starting a new root entry`)],
     };
+  },
 
-    const roots: unknown[] = space.nodes.filter((n) => !hasParent.has(n.id)).map((n) => render(n.id, new Set()));
-    // Nodes only reachable through a cycle: start one where the cycle is entered.
-    for (const n of space.nodes) if (!reached.has(n.id)) roots.push(render(n.id, new Set()));
+  write(space, p, ctx) {
+    const { roots } = layout(space, p, ctx);
     return { output: ctx.rootArray === false ? Object.fromEntries([[p.rootKey, roots]]) : roots };
   },
 });

@@ -93,10 +93,10 @@ describe('import plan (dry run) and apply', () => {
   const existing = RD;
   const incoming = {
     nodes: [{ id: 'carbonara' }, { id: 'ramen', label: 'Ramen!' }, { id: 'pho' }],
-    edges: [RD.edges.find((e) => e.child === 'ramen')!, { id: defaultEdgeId('food', 'pho'), parent: 'food', child: 'pho', kind: 'contains' }, { ...RD.edges[0]!, order: 'a' }],
+    edges: [RD.edges.find((e) => e.child === 'ramen')!, { id: defaultEdgeId('food', 'pho'), parent: 'food', child: 'pho', kind: 'contains' }, { ...RD.edges[0]!, label: 'It' }],
   };
 
-  it('plans create / skip (identical by content hash) / conflict per id', () => {
+  it('plans create / skip (nothing carried differs) / conflict per id, naming the changed fields', () => {
     const plan = planImport(existing, incoming);
     expect(plan.nodes.map((e) => [e.id, e.action, e.reason])).toEqual([
       ['carbonara', 'skip', 'identical'],
@@ -104,6 +104,8 @@ describe('import plan (dry run) and apply', () => {
       ['pho', 'create', 'new'],
     ]);
     expect(plan.edges.map((e) => e.action)).toEqual(['skip', 'create', 'conflict']);
+    expect(plan.nodes[1]!.changes).toEqual(['label']);
+    expect(plan.edges[2]!.changes).toEqual(['label']);
     expect(plan.summary).toEqual({ create: 2, update: 0, skip: 2, conflict: 2 });
     expect(planImport(existing, incoming, { onConflict: 'update' }).summary).toEqual({ create: 2, update: 2, skip: 2, conflict: 0 });
   });
@@ -122,7 +124,7 @@ describe('import plan (dry run) and apply', () => {
     const all = applyImport(existing, plan, { resolve: 'update' });
     if (!all.ok) throw new Error('expected ok');
     expect(all.delta.removed).toEqual([RD.edges[0]!.id]);
-    expect(all.space.edges[0]).toMatchObject({ order: 'a' });
+    expect(all.space.edges[0]).toMatchObject({ label: 'It' });
   });
 
   it('a round trip through a lossless grammar plans nothing but skips', async () => {

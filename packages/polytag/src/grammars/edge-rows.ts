@@ -23,10 +23,10 @@ import { type Detection, defineGrammar, noDetection } from '../grammar.js';
 import type { GrammarCapabilities } from '../loss.js';
 import { customEdgeIdsOf, hasNodeMeta } from '../model/features.js';
 import { CONTAINS, type SnapshotEdge, type SnapshotNode, positionalOrders } from '../model/snapshot.js';
-import { type SpaceBuilder, createSpaceBuilder } from './shared/builder.js';
+import { type SpaceBuilder, createSpaceBuilder, seg } from './shared/builder.js';
 import { FAMILY_KEY, PAYLOAD_KEY, coerceString, own, readNodeData, type RecordLayout, writeRecord } from './shared/records.js';
 import { LEXICON, inLexicon, isScalar, recordArray } from './shared/shape.js';
-import { cardinality, cellOf, columnIndex, familyCell, jsonCell, payloadCells, payloadColumns, readFamily, readPayload } from './shared/table.js';
+import { cardinality, cellOf, columnIndex, familyCell, jsonCell, payloadCells, payloadColumns, readFamily, readPayload, tablePlan } from './shared/table.js';
 
 /** Params of `edge-rows`. */
 export const edgeRowsParams = z.object({
@@ -115,8 +115,8 @@ function parseValue(input: unknown, p: EdgeRowsParams): ReturnType<typeof create
     const nodes = own(input, p.nodesKey);
     if (Array.isArray(edges)) edgeList = edges;
     if (Array.isArray(nodes)) nodeList = nodes;
-    edgeBase = `/${p.edgesKey}`;
-    for (const [k, v] of Object.entries(input)) if (k !== p.edgesKey && k !== p.nodesKey) builder.leftover(`/${k}`, v);
+    edgeBase = `/${seg(p.edgesKey)}`;
+    for (const [k, v] of Object.entries(input)) if (k !== p.edgesKey && k !== p.nodesKey) builder.leftover(`/${seg(k)}`, v);
     if (edgeList === undefined && !Array.isArray(nodes)) {
       builder.diag({ severity: 'error', code: 'shape', message: `expected '${p.edgesKey}' and/or '${p.nodesKey}' arrays`, path: '' });
       return builder;
@@ -128,18 +128,21 @@ function parseValue(input: unknown, p: EdgeRowsParams): ReturnType<typeof create
   }
   const layout: RecordLayout = { idKey: p.idKey, labelKey: p.labelKey, structural: [] };
   nodeList.forEach((record, i) => {
-    const path = `/${p.nodesKey}/${i}`;
+    const path = `/${seg(p.nodesKey)}/${i}`;
     if (isScalar(record)) {
-      builder.node(coerceString(record, 'node id', path, builder)!);
+      const id = coerceString(record, 'node id', path, builder)!;
+      builder.node(id);
+      builder.record(id);
       return;
     }
-    const id = isPlainObject(record) ? coerceString(own(record, p.idKey), 'node id', `${path}/${p.idKey}`, builder) : undefined;
+    const id = isPlainObject(record) ? coerceString(own(record, p.idKey), 'node id', `${path}/${seg(p.idKey)}`, builder) : undefined;
     if (id === undefined || !isPlainObject(record)) {
       builder.diag({ severity: 'error', code: 'missing-id', message: `node record has no '${p.idKey}'; skipped`, path });
       builder.leftover(path, record);
       return;
     }
     builder.node(id, readNodeData(record, layout, path, builder), path);
+    builder.record(id);
   });
   const known = new Set([p.parentKey, p.childKey, p.kindKey, p.labelKey, p.orderKey, p.idKey, p.metaKey]);
   const rows: (EdgeFields & { path: string })[] = [];
@@ -150,8 +153,8 @@ function parseValue(input: unknown, p: EdgeRowsParams): ReturnType<typeof create
       builder.leftover(path, row);
       return;
     }
-    const parent = coerceString(own(row, p.parentKey), 'parent', `${path}/${p.parentKey}`, builder);
-    const child = coerceString(own(row, p.childKey), 'child', `${path}/${p.childKey}`, builder);
+    const parent = coerceString(own(row, p.parentKey), 'parent', `${path}/${seg(p.parentKey)}`, builder);
+    const child = coerceString(own(row, p.childKey), 'child', `${path}/${seg(p.childKey)}`, builder);
     if (parent === undefined || child === undefined) {
       builder.diag({ severity: 'error', code: 'missing-id', message: `edge row needs '${p.parentKey}' and '${p.childKey}'; skipped`, path });
       builder.leftover(path, row);
@@ -206,6 +209,7 @@ function parseTable(table: Table, p: EdgeRowsParams): ReturnType<typeof createSp
     }
     if (parentId === '') {
       // A node row: the node in `child`, with its label, family and payload.
+      builder.record(childId);
       builder.node(
         childId,
         {
@@ -385,6 +389,7 @@ export const edgeRows = defineGrammar<EdgeRowsParams>({
   capabilities: (p) => (p.edgeIds === 'never' ? { ...LOSSLESS, edgeIds: 'no' } : LOSSLESS),
   detect,
   parse: (input, p) => (isTable(input) ? parseTable(input, p) : parseValue(input, p)).build(),
+  plan: (space, _p, ctx) => (ctx.kind === 'table' ? tablePlan(space) : { space, losses: [] }),
   write(space, p, ctx) {
     return { output: ctx.kind === 'table' ? writeTable(space.nodes, space.edges, p) : writeValue(space.nodes, space.edges, p) };
   },

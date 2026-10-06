@@ -22,7 +22,7 @@ import { type Detection, defineGrammar, noDetection } from '../grammar.js';
 import type { GrammarCapabilities } from '../loss.js';
 import { customEdgeIdsOf } from '../model/features.js';
 import { CONTAINS, type SnapshotNode } from '../model/snapshot.js';
-import { type NodeData, type SpaceBuilder, createSpaceBuilder } from './shared/builder.js';
+import { type NodeData, type SpaceBuilder, createSpaceBuilder, seg } from './shared/builder.js';
 import { FAMILY_KEY, PAYLOAD_KEY, coerceString, hasOwn, isFamilyRule, own } from './shared/records.js';
 
 /** Params of `node-link`. */
@@ -130,7 +130,7 @@ function parseJgf(graph: Record<string, unknown>, base: string, builder: SpaceBu
     builder.diag({ severity: 'warning', code: 'shape', message: 'the graph is undirected; source is read as the group and target as the member', path: base });
   }
   const nodes = own(graph, 'nodes');
-  if (isPlainObject(nodes)) for (const [id, n] of Object.entries(nodes)) readJgfNode(builder, id, n, `${base}/nodes/${id}`);
+  if (isPlainObject(nodes)) for (const [id, n] of Object.entries(nodes)) readJgfNode(builder, id, n, `${base}/nodes/${seg(id)}`);
   else if (Array.isArray(nodes)) {
     nodes.forEach((n, i) => {
       const id = isPlainObject(n) ? coerceString(own(n, 'id'), 'node id', `${base}/nodes/${i}`, builder) : undefined;
@@ -140,7 +140,7 @@ function parseJgf(graph: Record<string, unknown>, base: string, builder: SpaceBu
   }
   const edges = own(graph, 'edges');
   if (Array.isArray(edges)) edges.forEach((e, i) => readEdge(builder, e, `${base}/edges/${i}`, 'jgf'));
-  for (const k of Object.keys(graph)) if (!['nodes', 'edges', 'directed', 'type', 'label', 'metadata', 'id'].includes(k)) builder.leftover(`${base}/${k}`, own(graph, k));
+  for (const k of Object.keys(graph)) if (!['nodes', 'edges', 'directed', 'type', 'label', 'metadata', 'id'].includes(k)) builder.leftover(`${base}/${seg(k)}`, own(graph, k));
 }
 
 function parsePlain(nodes: unknown[], links: unknown[], linksKey: string, builder: SpaceBuilder): void {

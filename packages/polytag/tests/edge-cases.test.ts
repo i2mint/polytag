@@ -83,10 +83,11 @@ describe('the fixtures', () => {
     expect(read.space.nodes.find((n) => n.id === 'a')?.label).toBe('salt;pepper');
     const space: SpaceSnapshot = { nodes: [{ id: 'salt;pepper' }, { id: 'a', label: 'x;y' }], edges: [e('salt;pepper', 'a')] };
     const { loss, text } = await writeText(space, { format: 'csv', grammar: 'delimited' });
-    expect(loss.losses).toContainEqual(expect.objectContaining({ kind: 'identity-collision', severity: 'drop', ids: ['salt;pepper'] }));
-    expect((await readText(text, { format: 'csv', grammar: 'delimited' })).space.nodes.map((n) => n.id).sort()).toEqual(['a', 'pepper', 'salt']);
+    expect(loss.losses).toContainEqual(expect.objectContaining({ kind: 'identity-collision', severity: 'drop', ids: [defaultEdgeId('salt;pepper', 'a')] }));
+    // The membership is left out (reported), so the read gives no phantom groups.
+    expect((await readText(text, { format: 'csv', grammar: 'delimited' })).space.nodes.map((n) => n.id).sort()).toEqual(['a', 'salt;pepper']);
     const paths = await writeText({ nodes: [{ id: 'a/b' }, { id: 'x' }], edges: [e('a/b', 'x')] }, { format: 'json', grammar: 'tag-paths' });
-    expect(paths.loss.losses).toContainEqual(expect.objectContaining({ kind: 'identity-collision', ids: ['a/b'] }));
+    expect(paths.loss.losses).toContainEqual(expect.objectContaining({ kind: 'identity-collision', ids: [defaultEdgeId('a/b', 'x')] }));
   });
 
   it("tag 010: YAML reads unquoted 010 as 10 and says so; a '010' id round-trips quoted", async () => {

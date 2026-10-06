@@ -16,48 +16,53 @@ const pointerSegment = (key: string | number): string => String(key).replace(/~/
 
 /**
  * JSON-pointer paths of every node in `value` for which `test` holds (not descending into a
- * match). Cycle-safe: an object already on the current path is skipped.
+ * match). Cycle-safe (an object is visited once), and iterative, so deep values are fine.
  */
 export function findPaths(value: unknown, test: (v: unknown) => boolean): string[] {
   const found: string[] = [];
-  const stack = new Set<object>();
-  const walk = (v: unknown, path: string): void => {
+  const seen = new Set<object>();
+  const stack: [unknown, string][] = [[value, '']];
+  while (stack.length) {
+    const [v, path] = stack.pop()!;
     if (test(v)) {
       found.push(path);
-      return;
+      continue;
     }
-    if (v === null || typeof v !== 'object' || stack.has(v)) return;
-    stack.add(v);
+    if (v === null || typeof v !== 'object' || seen.has(v)) continue;
+    seen.add(v);
     const entries: [string | number, unknown][] = Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v);
-    for (const [k, x] of entries) walk(x, `${path}/${pointerSegment(k)}`);
-    stack.delete(v);
-  };
-  walk(value, '');
+    for (let i = entries.length - 1; i >= 0; i--) stack.push([entries[i]![1], `${path}/${pointerSegment(entries[i]![0])}`]);
+  }
   return found;
 }
 
 /**
  * A copy of `value` without the nodes for which `test` holds: dropped from objects (the key
- * disappears) and from arrays (the element disappears). Shared sub-objects stay shared.
+ * disappears) and from arrays (the element disappears). Shared sub-objects stay shared, and
+ * cycles stay cycles. Iterative, so deep values are fine.
  */
 export function stripValues(value: unknown, test: (v: unknown) => boolean): unknown {
   const copies = new Map<object, unknown>();
-  const strip = (v: unknown): unknown => {
+  const work: [object, unknown[] | Record<string, unknown>][] = [];
+  const copyOf = (v: unknown): unknown => {
     if (v === null || typeof v !== 'object') return v;
     if (copies.has(v)) return copies.get(v);
-    if (Array.isArray(v)) {
-      const out: unknown[] = [];
-      copies.set(v, out);
-      for (const x of v) if (!test(x)) out.push(strip(x));
-      return out;
-    }
-    if (!isPlainObject(v)) return v;
-    const out: Record<string, unknown> = {};
+    if (!Array.isArray(v) && !isPlainObject(v)) return v;
+    const out = Array.isArray(v) ? [] : {};
     copies.set(v, out);
-    for (const [k, x] of Object.entries(v)) {
-      if (!test(x)) Object.defineProperty(out, k, { value: strip(x), enumerable: true, writable: true, configurable: true });
-    }
+    work.push([v, out]);
     return out;
   };
-  return strip(value);
+  const root = copyOf(value);
+  while (work.length) {
+    const [src, out] = work.pop()!;
+    if (Array.isArray(src)) {
+      for (const x of src) if (!test(x)) (out as unknown[]).push(copyOf(x));
+    } else {
+      for (const [k, x] of Object.entries(src)) {
+        if (!test(x)) Object.defineProperty(out, k, { value: copyOf(x), enumerable: true, writable: true, configurable: true });
+      }
+    }
+  }
+  return root;
 }

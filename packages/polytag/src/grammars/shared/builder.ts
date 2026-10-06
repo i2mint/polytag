@@ -8,6 +8,7 @@
  * D8: enforce on write, never trust on read; the projections are cycle-safe).
  */
 
+import type { Location } from '../../formats/index.js';
 import type { Diagnostic, ParseResult, Residue } from '../../grammar.js';
 import { defaultIsMembership, type MembershipTest } from '../../model/features.js';
 import {
@@ -53,10 +54,23 @@ export interface SpaceBuilder {
   edge(parent: string, child: string, data?: EdgeData, path?: string): string | undefined;
   /** Set the order of an edge already added. */
   setOrder(edgeId: string, order: string): void;
+  /** Report a problem; its `path` also becomes a structured `at`. */
   diag(d: Diagnostic): void;
   leftover(path: string, value: unknown): void;
-  build(options?: { readonly isMembership?: MembershipTest }): ParseResult;
+  /** Note that the input declared `id` as a record (an item with its own entry). */
+  record(id: string): void;
+  build(options?: { readonly isMembership?: MembershipTest; readonly spaces?: ParseResult['spaces'] }): ParseResult;
 }
+
+/** The structured location of a diagnostic path: a JSON pointer, or `row N[, column C]`. */
+export function locationOf(path: string): Location | undefined {
+  const row = /^row (\d+)(?:, column (.*))?$/.exec(path);
+  if (row) return row[2] === undefined ? { row: Number(row[1]) } : { row: Number(row[1]), column: row[2] };
+  return path === '' || path.startsWith('/') ? { pointer: path } : undefined;
+}
+
+/** Escape a key as one JSON-pointer segment (RFC 6901). */
+export const seg = (key: string | number): string => String(key).replace(/~/g, '~0').replace(/\//g, '~1');
 
 /** A fresh, empty builder. */
 export function createSpaceBuilder(): SpaceBuilder {
@@ -66,6 +80,7 @@ export function createSpaceBuilder(): SpaceBuilder {
   const diagnostics: Diagnostic[] = [];
   const residue: Residue[] = [];
   const conflicts = new Set<string>();
+  const records = new Set<string>();
 
   const mint = (parent: string, child: string, kind: string): string => {
     const key = defaultEdgeId(parent, child, kind);
@@ -126,9 +141,13 @@ export function createSpaceBuilder(): SpaceBuilder {
       const e = edges.get(edgeId);
       if (e) edges.set(edgeId, { ...e, order });
     },
-    diag: (d) => diagnostics.push(d),
+    diag(d) {
+      const at = d.at ?? (d.path === undefined ? undefined : locationOf(d.path));
+      diagnostics.push(at ? { ...d, at } : d);
+    },
     leftover: (path, value) => residue.push({ path, value }),
-    build({ isMembership = defaultIsMembership } = {}) {
+    record: (id) => void records.add(id),
+    build({ isMembership = defaultIsMembership, spaces } = {}) {
       const edgeList = [...edges.values()];
       for (const cycle of findCycles(edgeList.filter((e) => isMembership(e.kind)))) {
         diagnostics.push({
@@ -138,7 +157,13 @@ export function createSpaceBuilder(): SpaceBuilder {
           ids: cycle,
         });
       }
-      return { space: { nodes: [...nodes.values()], edges: edgeList }, residue, diagnostics };
+      return {
+        space: { nodes: [...nodes.values()], edges: edgeList },
+        residue,
+        diagnostics,
+        ...(records.size ? { records: [...records] } : {}),
+        ...(spaces ? { spaces } : {}),
+      };
     },
   };
   return builder;

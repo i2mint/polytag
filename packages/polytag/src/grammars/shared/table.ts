@@ -8,7 +8,8 @@
  */
 
 import { isPlainObject, type Table } from '../../formats/index.js';
-import type { FamilyRule, SnapshotNode } from '../../model/snapshot.js';
+import { type Loss, type Reduction, loss } from '../../loss.js';
+import type { FamilyRule, SnapshotNode, SpaceSnapshot } from '../../model/snapshot.js';
 import type { SpaceBuilder } from './builder.js';
 import { FAMILY_KEY, PAYLOAD_KEY, isFamilyRule } from './records.js';
 
@@ -24,16 +25,22 @@ export interface PayloadColumns {
   readonly columns: readonly string[];
 }
 
-/** Choose the payload columns for `nodes` given the column names already taken. */
-export function payloadColumns(nodes: readonly SnapshotNode[], taken: readonly string[]): PayloadColumns {
+/**
+ * Choose the payload columns for `nodes` given the column names already taken; `spreadable`
+ * may veto spreading (one-hot: columns that would read back as groups).
+ */
+export function payloadColumns(nodes: readonly SnapshotNode[], taken: readonly string[], spreadable: (columns: readonly string[]) => boolean = () => true): PayloadColumns {
   const payloads = nodes.map((n) => n.payload).filter((p) => p !== undefined);
   if (!payloads.length) return { mode: 'spread', columns: [] };
   const reserved = new Set([...taken, PAYLOAD_KEY, FAMILY_KEY]);
-  const spreadable = payloads.every(
+  const spreadOk = spreadable;
+  const spreadable0 = payloads.every(
     (p) => isPlainObject(p) && Object.keys(p).length > 0 && Object.entries(p).every(([k, v]) => k !== '' && !reserved.has(k) && typeof v === 'string' && v !== ''),
   );
-  if (!spreadable) return { mode: 'json', columns: [PAYLOAD_KEY] };
-  return { mode: 'spread', columns: [...new Set(payloads.flatMap((p) => Object.keys(p as object)))] };
+  if (!spreadable0) return { mode: 'json', columns: [PAYLOAD_KEY] };
+  const columns = [...new Set(payloads.flatMap((p) => Object.keys(p as object)))];
+  if (!spreadOk(columns)) return { mode: 'json', columns: [PAYLOAD_KEY] };
+  return { mode: 'spread', columns };
 }
 
 /** A node's payload cells, in `layout.columns` order. */
@@ -82,4 +89,52 @@ export function readPayload(row: readonly string[], table: Table, payloadIndex: 
 export function cardinality(table: Table, index: number): number {
   const values = table.rows.map((r) => cellOf(r, index)).filter((v) => v !== '');
   return values.length ? new Set(values).size / values.length : 1;
+}
+
+/**
+ * What a table cannot hold, planned before writing: an empty cell reads as absent, so an
+ * empty label or order is left out, and a node with an empty id cannot be a row (it and its
+ * edges are left out). Pure; reports each by id.
+ */
+export function tablePlan(space: SpaceSnapshot): Reduction {
+  const losses: Loss[] = [];
+  const emptyNode = space.nodes.some((n) => n.id === '');
+  const deadEdges = space.edges.filter((e) => e.parent === '' || e.child === '').map((e) => e.id);
+  if (emptyNode || deadEdges.length) {
+    losses.push(loss('identity-collision', 'drop', [...(emptyNode ? [''] : []), ...deadEdges], 'a node with an empty id cannot be a table row; it and its edges are left out'));
+  }
+  const dead = new Set(deadEdges);
+  const edges0 = space.edges.filter((e) => !dead.has(e.id));
+  const groups = new Set(edges0.map((e) => e.parent));
+  const blankLabel = space.nodes.filter((n) => n.id !== '' && n.label === '');
+  losses.push(
+    loss('group-meta', 'drop', blankLabel.filter((n) => groups.has(n.id)).map((n) => n.id), 'an empty label reads back as no label in a table'),
+    loss('item-meta', 'drop', blankLabel.filter((n) => !groups.has(n.id)).map((n) => n.id), 'an empty label reads back as no label in a table'),
+    loss('edge-label', 'drop', edges0.filter((e) => e.label === '').map((e) => e.id), 'an empty edge label reads back as no label in a table'),
+    loss('edge-order', 'drop', edges0.filter((e) => e.order === '').map((e) => e.id), 'an empty order reads back as no order in a table'),
+  );
+  const nodes = space.nodes
+    .filter((n) => n.id !== '')
+    .map((n) => {
+      if (n.label !== '') return n;
+      const { label: _, ...rest } = n;
+      return rest;
+    });
+  const edges = edges0.map((e) => {
+    if (e.label !== '' && e.order !== '') return e;
+    const { label, order, ...rest } = e;
+    return { ...rest, ...(label !== '' && label !== undefined ? { label } : {}), ...(order !== '' && order !== undefined ? { order } : {}) };
+  });
+  return { space: { nodes, edges }, losses };
+}
+
+/** Run plans one after the other, collecting their losses. */
+export function chainPlans(space: SpaceSnapshot, ...plans: ((s: SpaceSnapshot) => Reduction)[]): Reduction {
+  return plans.reduce<Reduction>(
+    (acc, plan) => {
+      const next = plan(acc.space);
+      return { space: next.space, losses: [...acc.losses, ...next.losses] };
+    },
+    { space, losses: [] },
+  );
 }

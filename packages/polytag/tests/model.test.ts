@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { yaml } from '../src/formats/index.js';
 import {
   type AnyGrammar,
   assess,
@@ -134,13 +133,13 @@ describe('the loss report (computed before writing)', () => {
 
   it('formatting: overwriting a commented file reports its comments and layout', async () => {
     const previous = '# my recipes\nfood: [italian]  # the root\n';
-    const report = assess(RD, nested, { format: 'yaml', previous: { text: previous, format: yaml } });
+    const report = assess(RD, nested, { format: 'yaml', previous });
     expect(report.lossless).toBe(false);
     expect(report.losses).toEqual([
       expect.objectContaining({ kind: 'formatting', severity: 'drop', ids: ['line 1', 'line 2'] }),
       expect.objectContaining({ kind: 'formatting', severity: 'degrade' }),
     ]);
-    expect(assess(RD, nested, { format: 'yaml', previous: { text: 'food: [italian]\n', format: yaml } }).lossless).toBe(true);
+    expect(assess(RD, nested, { format: 'yaml', previous: 'food: [italian]\n' }).lossless).toBe(true);
     const written = await writeText(RD, { format: 'yaml', grammar: 'nested', previous });
     expect(written.loss.losses.map((l) => l.kind)).toEqual(['formatting', 'formatting']);
   });
@@ -148,7 +147,7 @@ describe('the loss report (computed before writing)', () => {
   it('format limits join the report: TOML cannot write null', async () => {
     const space = { nodes: [{ id: 'a', payload: { x: null, y: 1 } }], edges: [] };
     const { loss, text } = await writeText(space, { format: 'toml', grammar: 'edge-rows' });
-    expect(loss.losses).toEqual([expect.objectContaining({ kind: 'format-value', severity: 'drop', ids: ['/nodes/0/x'] })]);
+    expect(loss.losses).toEqual([expect.objectContaining({ kind: 'format-value', severity: 'drop', ids: ['a'] })]);
     expect(text).not.toMatch(/null/);
   });
 

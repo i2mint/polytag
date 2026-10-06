@@ -18,13 +18,14 @@
 import { z } from 'zod';
 import { isTable } from '../formats/index.js';
 import { type Detection, defineGrammar, noDetection } from '../grammar.js';
-import { type GrammarCapabilities, loss } from '../loss.js';
+import type { GrammarCapabilities } from '../loss.js';
 import { createSpaceBuilder } from './shared/builder.js';
-import { createFlatReader, flatRecords } from './shared/flat.js';
+import { createFlatReader, flatPlan, flatRecords } from './shared/flat.js';
 import { itemColumns, readItemRow, writeItemTable } from './shared/item-table.js';
 import { FAMILY_KEY, PAYLOAD_KEY } from './shared/records.js';
 import { pickIdKey } from './shared/shape.js';
-import { cellOf, columnIndex } from './shared/table.js';
+import type { SnapshotNode } from '../model/snapshot.js';
+import { cellOf, chainPlans, columnIndex, tablePlan } from './shared/table.js';
 
 const TRUE = ['1', 'true', 'True', 'TRUE', 'x', 'X', 'yes', 'Yes', 'YES', 'y', 'Y'];
 const FALSE = ['0', 'false', 'False', 'FALSE', 'no', 'No', 'NO', 'n', 'N', ''];
@@ -128,6 +129,7 @@ export const oneHot = defineGrammar<OneHotParams>({
       const path = `row ${r + 2}`;
       const item = readItemRow(row, input, cols, path, builder);
       if (item === undefined) return;
+      builder.record(item);
       const tags = groupIdx.filter((i) => {
         const cell = cellOf(row, i);
         if (truthy.has(cell)) return true;
@@ -139,26 +141,27 @@ export const oneHot = defineGrammar<OneHotParams>({
     return builder.build();
   },
 
+  plan: (space, p) =>
+    chainPlans(space, tablePlan, (s) =>
+      flatPlan(s, {
+        invalidToken: (g) => [p.idKey, p.labelKey, FAMILY_KEY, PAYLOAD_KEY].includes(`${p.columnPrefix}${g}`),
+        tokenRule: `would be the same column as the id, label, family or payload column`,
+      }),
+    ),
+
   write(space, p) {
     const { records, groups } = flatRecords(space);
     const header = groups.map((g) => `${p.columnPrefix}${g}`);
-    const { table, payloadColumns } = writeItemTable(records, p, {
-      columns: header,
-      cells: (r) => groups.map((g) => (r.tags.includes(g) ? p.trueValue : p.falseValue)),
-    });
-    const others = table.columns.slice(0, table.columns.length - header.length);
-    const colliding = groups.filter((g, i) => others.includes(header[i]!) || header.indexOf(header[i]!) !== i || (!p.columnPrefix && g === ''));
     const domain = new Set([...p.trueValues, ...p.falseValues]);
-    const lookBoolean = p.groupColumns || p.columnPrefix ? [] : payloadColumns.filter((c) => {
-      const i = table.columns.indexOf(c);
-      return table.rows.every((row) => domain.has(cellOf(row, i))) && table.rows.some((row) => cellOf(row, i) !== '');
-    });
-    return {
-      output: table,
-      losses: [
-        loss('identity-collision', 'drop', colliding, `${colliding.length} group id(s) collide with another column name or are empty`),
-        loss('identity-collision', 'degrade', lookBoolean, `${lookBoolean.length} payload column(s) hold only boolean-looking values and would read back as groups (pass groupColumns or columnPrefix)`),
-      ],
-    };
+    // Payload columns whose values all look boolean would read back as groups: write JSON instead.
+    const inferred = !p.groupColumns && !p.columnPrefix;
+    const spreadable = (nodes: readonly SnapshotNode[], columns: readonly string[]): boolean =>
+      !inferred ||
+      columns.every((c) => {
+        const cells = nodes.map((n) => (n.payload as Record<string, unknown> | undefined)?.[c]).map((v) => (v === undefined ? '' : String(v)));
+        return !(cells.every((v) => domain.has(v)) && cells.some((v) => v !== ''));
+      });
+    const { table } = writeItemTable(records, p, { columns: header, cells: (r) => groups.map((g) => (r.tags.includes(g) ? p.trueValue : p.falseValue)) }, { spreadable });
+    return { output: table };
   },
 });

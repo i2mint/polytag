@@ -8,10 +8,15 @@
  * so the same group under two parents is written as two paths (a convention; Obsidian would
  * see two tags). `materialised` mode (Lightroom) also writes every ancestor, so on read a
  * tag that is a prefix of another tag of the same item is implied, not direct.
+ *
+ * Writing is two steps. {@link flatPlan} decides, before anything is written, what cannot be
+ * expressed as tokens or paths (a group id that would split or vanish on read, a parallel
+ * membership, a cycle, an implied materialised path) and takes those edges out, reporting
+ * each by id; {@link flatRecords} then lays out the planned space, which reads back exactly.
  */
 
 import type { SpaceBuilder } from './builder.js';
-import { type Loss, loss } from '../../loss.js';
+import { type Loss, type Reduction, loss } from '../../loss.js';
 import { type SnapshotEdge, type SnapshotNode, type SpaceSnapshot, findCycles } from '../../model/snapshot.js';
 
 /** Path-string settings. */
@@ -32,92 +37,163 @@ export interface FlatLayout {
   readonly records: readonly FlatRecord[];
   /** Groups (parents of an edge), in node order. */
   readonly groups: readonly string[];
-  /** Extra losses only the writer sees (cycles not expressible as paths, implied memberships, ids that split). */
-  readonly losses: readonly Loss[];
 }
 
-/**
- * Lay out a reduced space item-major. Without `paths`, an item's tags are its parents' ids;
- * with `paths`, each parent becomes every root path to it (cycle-safe, at most `maxPaths`).
- */
-export function flatRecords(space: SpaceSnapshot, paths?: PathOptions, { maxPaths = 256 } = {}): FlatLayout {
-  const groupSet = new Set(space.edges.map((e) => e.parent));
+/** At most this many root paths are written per group (a diamond-shaped hierarchy multiplies them). */
+const MAX_PATHS = 256;
+
+const byChild = (edges: readonly SnapshotEdge[]): Map<string, SnapshotEdge[]> => {
   const incoming = new Map<string, SnapshotEdge[]>();
-  for (const e of space.edges) {
+  for (const e of edges) {
     const list = incoming.get(e.child);
     if (list) list.push(e);
     else incoming.set(e.child, [e]);
   }
-  const groups = space.nodes.filter((n) => groupSet.has(n.id)).map((n) => n.id);
-  const items = space.nodes.filter((n) => !groupSet.has(n.id));
-  if (!paths) {
-    return { records: items.map((node) => ({ node, tags: (incoming.get(node.id) ?? []).map((e) => e.parent) })), groups, losses: [] };
-  }
+  return incoming;
+};
 
-  // Root paths of a group, through group → group edges only.
-  const groupParents = (g: string): string[] => [...new Set((incoming.get(g) ?? []).map((e) => e.parent))];
-  const acyclic = findCycles(space.edges.filter((e) => groupSet.has(e.child))).length === 0;
+/**
+ * A root-path finder over the group → group edges of `edges`: every path from a root (a
+ * group with no parent, or one where a cycle is entered) down to `g`, at most `maxPaths`.
+ * Iterative, so a deep hierarchy does not overflow the stack.
+ */
+function pathFinder(edges: readonly SnapshotEdge[], maxPaths: number): (g: string) => string[][] {
+  const groups = new Set(edges.map((e) => e.parent));
+  const groupEdges = edges.filter((e) => groups.has(e.child));
+  const parents = new Map<string, string[]>();
+  for (const e of groupEdges) {
+    const list = parents.get(e.child);
+    if (!list) parents.set(e.child, [e.parent]);
+    else if (!list.includes(e.parent)) list.push(e.parent);
+  }
+  const acyclic = findCycles(groupEdges, 1).length === 0;
   const memo = new Map<string, string[][]>();
-  const pathsTo = (g: string, chain: ReadonlySet<string>): string[][] => {
-    if (acyclic && memo.has(g)) return memo.get(g)!;
-    const parents = groupParents(g).filter((p) => !chain.has(p));
-    const next = new Set(chain).add(g);
-    const out: string[][] = parents.length ? [] : [[g]];
-    for (const p of parents) {
-      for (const path of pathsTo(p, next)) {
-        if (out.length >= maxPaths) break;
-        out.push([...path, g]);
-      }
+  return (g) => {
+    const cached = memo.get(g);
+    if (cached) return cached;
+    const out: string[][] = [];
+    const stack: string[][] = [[g]];
+    while (stack.length && out.length < maxPaths) {
+      const suffix = stack.pop()!;
+      const ps = (parents.get(suffix[0]!) ?? []).filter((p) => acyclic || !suffix.includes(p));
+      if (!ps.length) out.push(suffix);
+      for (let i = ps.length - 1; i >= 0; i--) stack.push([ps[i]!, ...suffix]);
     }
     if (acyclic) memo.set(g, out);
     return out;
   };
+}
 
-  const { separator, mode } = paths;
-  const covered = new Set<string>();
+/** What makes a group id writable as a token, besides not being empty. */
+export interface FlatPlanOptions {
+  readonly paths?: PathOptions;
+  /** A group id the grammar cannot write as a token (contains the delimiter, has spaces it trims...). */
+  readonly invalidToken?: (id: string) => boolean;
+  /** Why such an id cannot be written (for the loss message). */
+  readonly tokenRule?: string;
+}
+
+/**
+ * Plan an item-major write: take out every edge the tokens or paths cannot carry, and
+ * report it. The returned space is what {@link flatRecords} writes and the reader gives back.
+ */
+export function flatPlan(space: SpaceSnapshot, { paths, invalidToken = () => false, tokenRule = 'cannot be written as a token' }: FlatPlanOptions = {}): Reduction {
+  const losses: Loss[] = [];
+  let edges = [...space.edges];
+  const groupsOf = (es: readonly SnapshotEdge[]): Set<string> => new Set(es.map((e) => e.parent));
+
+  // 1. Group ids that would split, vanish or collide on read: their memberships are left out,
+  //    and the node itself is written as a record (any id is fine there).
+  const bad = [...groupsOf(edges)].filter((g) => g === '' || invalidToken(g) || (paths !== undefined && g.includes(paths.separator)));
+  if (bad.length) {
+    const badSet = new Set(bad);
+    const out = edges.filter((e) => badSet.has(e.parent) || badSet.has(e.child)).map((e) => e.id);
+    const rule = paths ? `contain the path separator '${paths.separator}', are empty, or ${tokenRule}` : `are empty or ${tokenRule}`;
+    losses.push(loss('identity-collision', 'drop', out, `the group id(s) ${bad.map((b) => JSON.stringify(b)).join(', ')} ${rule}; their ${out.length} membership(s) are left out`));
+    const outSet = new Set(out);
+    edges = edges.filter((e) => !outSet.has(e.id));
+  }
+  if (!paths) return { space: { nodes: space.nodes, edges }, losses };
+
+  // 2. Paths: repeat until nothing more is taken out (taking an edge out can change paths).
+  const repeated: string[] = [];
+  const uncovered: string[] = [];
   const implied: string[] = [];
-  const records = items.map((node): FlatRecord => {
-    const memberships = incoming.get(node.id) ?? [];
-    const written: string[][] = [];
+  for (let round = 0; round < 4; round++) {
+    const groups = groupsOf(edges);
+    const drop = new Set<string>();
+    // 2a. A repeated membership (parallel edge) has the same path: written once, read once.
     const seen = new Set<string>();
-    const add = (path: string[]): void => {
-      const key = path.join('\u0000');
+    for (const e of edges) {
+      const key = `${e.parent}\u0000${e.child}`;
+      if (seen.has(key)) drop.add(e.id), repeated.push(e.id);
+      seen.add(key);
+    }
+    // 2b. Group edges no written path covers (a cycle, or past the path cap).
+    const pathsTo = pathFinder(edges, MAX_PATHS);
+    const covered = new Set<string>();
+    const incoming = byChild(edges);
+    const items = space.nodes.filter((n) => !groups.has(n.id));
+    for (const item of items) {
+      const memberships = (incoming.get(item.id) ?? []).filter((e) => !drop.has(e.id));
+      const written = new Set<string>();
+      const perEdge = memberships.map((e) => {
+        const ps = pathsTo(e.parent);
+        for (const p of ps) {
+          for (let i = 1; i < p.length; i++) covered.add(`${p[i - 1]}\u0000${p[i]}`);
+          if (paths.mode === 'materialised') for (let i = 1; i <= p.length; i++) written.add(p.slice(0, i).join('\u0000'));
+          else written.add(p.join('\u0000'));
+        }
+        return { edge: e, keys: ps.map((p) => p.join('\u0000')) };
+      });
+      // 2c. Materialised: a direct membership in an ancestor reads as implied.
+      if (paths.mode === 'materialised') {
+        const isPrefix = (k: string): boolean => [...written].some((o) => o !== k && o.startsWith(`${k}\u0000`));
+        for (const { edge, keys } of perEdge) if (keys.every(isPrefix)) drop.add(edge.id), implied.push(edge.id);
+      }
+    }
+    for (const e of edges) if (groups.has(e.child) && !drop.has(e.id) && !covered.has(`${e.parent}\u0000${e.child}`)) drop.add(e.id), uncovered.push(e.id);
+    if (!drop.size) break;
+    edges = edges.filter((e) => !drop.has(e.id));
+  }
+  losses.push(
+    loss('membership', 'drop', repeated, `${repeated.length} repeated membership(s) (parallel edges) have the same path and read back once`),
+    loss('group-edges', 'drop', uncovered, `${uncovered.length} group → group edge(s) lie on a cycle or beyond ${MAX_PATHS} paths and cannot be written as paths`),
+    loss('membership', 'drop', implied, `${implied.length} direct membership(s) in an ancestor of another of the item's groups would read as implied by the longer materialised path`),
+  );
+  return { space: { nodes: space.nodes, edges }, losses };
+}
+
+/**
+ * Lay out a planned space item-major. Without `paths`, an item's tags are its parents' ids;
+ * with `paths`, each parent becomes every root path to it.
+ */
+export function flatRecords(space: SpaceSnapshot, paths?: PathOptions): FlatLayout {
+  const groupSet = new Set(space.edges.map((e) => e.parent));
+  const incoming = byChild(space.edges);
+  const groups = space.nodes.filter((n) => groupSet.has(n.id)).map((n) => n.id);
+  const items = space.nodes.filter((n) => !groupSet.has(n.id));
+  if (!paths) return { records: items.map((node) => ({ node, tags: (incoming.get(node.id) ?? []).map((e) => e.parent) })), groups };
+  const pathsTo = pathFinder(space.edges, MAX_PATHS);
+  const records = items.map((node): FlatRecord => {
+    const written: string[] = [];
+    const seen = new Set<string>();
+    const add = (p: readonly string[]): void => {
+      const key = p.join('\u0000');
       if (!seen.has(key)) {
         seen.add(key);
-        written.push(path);
+        written.push(p.join(paths.separator));
       }
     };
-    const parentsSeen = new Set<string>();
-    const perEdge = memberships.map((e) => {
-      // A parallel edge (the same group twice) has the same paths: written once, read once.
-      if (parentsSeen.has(e.parent)) implied.push(e.id);
-      parentsSeen.add(e.parent);
-      const ps = pathsTo(e.parent, new Set());
-      for (const p of ps) {
-        if (mode === 'materialised') for (let i = 1; i < p.length; i++) add(p.slice(0, i));
+    for (const e of incoming.get(node.id) ?? []) {
+      for (const p of pathsTo(e.parent)) {
+        if (paths.mode === 'materialised') for (let i = 1; i < p.length; i++) add(p.slice(0, i));
         add(p);
-        for (let i = 1; i < p.length; i++) covered.add(`${p[i - 1]}\u0000${p[i]}`);
       }
-      return { edge: e, keys: ps.map((p) => p.join('\u0000')) };
-    });
-    if (mode === 'materialised') {
-      const isPrefix = (k: string): boolean => [...seen].some((o) => o !== k && o.startsWith(`${k}\u0000`));
-      for (const { edge, keys } of perEdge) if (keys.every(isPrefix) && !implied.includes(edge.id)) implied.push(edge.id);
     }
-    return { node, tags: written.map((p) => p.join(separator)) };
+    return { node, tags: written };
   });
-
-  const uncovered = space.edges.filter((e) => groupSet.has(e.child) && !covered.has(`${e.parent}\u0000${e.child}`)).map((e) => e.id);
-  const splitting = groups.filter((id) => id.includes(separator) || id === '');
-  return {
-    records,
-    groups,
-    losses: [
-      loss('group-edges', 'drop', uncovered, `${uncovered.length} group → group edge(s) lie on a cycle or beyond ${maxPaths} paths and cannot be written as paths`),
-      loss('membership', 'drop', implied, `${implied.length} membership(s) would not read back: a repeated group, or (materialised) a direct membership in an ancestor of another of the item's groups`),
-      loss('identity-collision', 'drop', splitting, `${splitting.length} group id(s) are empty or contain the path separator '${separator}' and would split on read`),
-    ],
-  };
+  return { records, groups };
 }
 
 /** Reads item-major memberships into a builder, optionally as path strings. */
@@ -130,6 +206,7 @@ export interface FlatReader {
 export function createFlatReader(builder: SpaceBuilder, paths?: PathOptions): FlatReader {
   const groupEdges = new Set<string>();
   const seenRecords = new Map<string, Set<string>>();
+  const at = (path: string, i: number): string => (path.startsWith('row ') ? path : `${path}/${i}`);
   return {
     memberships(item, tags, path) {
       // A repeated record adds only memberships it did not already have.
@@ -144,7 +221,7 @@ export function createFlatReader(builder: SpaceBuilder, paths?: PathOptions): Fl
       };
       const nonEmpty = tags.filter((t, i) => {
         if (t !== '') return true;
-        builder.diag({ severity: 'warning', code: 'empty-token', message: `empty tag skipped`, path: `${path}/${i}`, ids: [item] });
+        builder.diag({ severity: 'warning', code: 'empty-token', message: 'empty tag skipped', path: at(path, i), ids: [item] });
         return false;
       });
       if (!paths) {

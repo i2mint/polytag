@@ -16,12 +16,12 @@
 import { z } from 'zod';
 import { isTable } from '../formats/index.js';
 import { type Detection, defineGrammar, noDetection } from '../grammar.js';
-import { type GrammarCapabilities, loss } from '../loss.js';
+import type { GrammarCapabilities } from '../loss.js';
 import { createSpaceBuilder } from './shared/builder.js';
-import { type PathOptions, createFlatReader, flatRecords } from './shared/flat.js';
+import { type PathOptions, createFlatReader, flatPlan, flatRecords } from './shared/flat.js';
 import { itemColumns, readItemRow, writeItemTable } from './shared/item-table.js';
 import { LEXICON, dominantSeparator, inLexicon, pickIdKey } from './shared/shape.js';
-import { cellOf, columnIndex } from './shared/table.js';
+import { cellOf, chainPlans, columnIndex, tablePlan } from './shared/table.js';
 
 /** Params of `delimited`. */
 export const delimitedParams = z.object({
@@ -64,7 +64,8 @@ function detect(input: unknown): Detection<DelimitedParams> {
     const named = inLexicon(name, LEXICON.tags);
     for (const d of DELIMITERS) {
       const share = cells.length ? cells.filter((c) => c.includes(d)).length / cells.length : 0;
-      const better = !best || Number(named) + share > Number(best.named) + best.share;
+      // A tag-like column name outweighs delimiters found in another column.
+      const better = !best || 1.5 * Number(named) + share > 1.5 * Number(best.named) + best.share;
       if ((named || share >= 0.2) && better) best = { index, delimiter: d, share, named };
     }
   });
@@ -116,6 +117,7 @@ export const delimited = defineGrammar<DelimitedParams>({
       const path = `row ${r + 2}`;
       const id = readItemRow(row, input, cols, path, builder);
       if (id === undefined) return;
+      builder.record(id);
       const cell = cellOf(row, tags);
       const tokens = cell === '' ? [] : cell.split(p.delimiter).map((t) => t.trim());
       reader.memberships(id, tokens, `${path}, column ${p.tagsKey}`);
@@ -123,19 +125,18 @@ export const delimited = defineGrammar<DelimitedParams>({
     return builder.build();
   },
 
+  plan: (space, p) =>
+    chainPlans(space, tablePlan, (s) =>
+      flatPlan(s, {
+        paths: pathsOf(p),
+        invalidToken: (g) => g.includes(p.delimiter) || g !== g.trim(),
+        tokenRule: `contain the delimiter '${p.delimiter}' or surrounding spaces (tokens are split and trimmed on read)`,
+      }),
+    ),
+
   write(space, p) {
-    const paths = pathsOf(p);
-    const { records, groups, losses } = flatRecords(space, paths);
+    const { records } = flatRecords(space, pathsOf(p));
     const { table } = writeItemTable(records, p, { columns: [p.tagsKey], cells: (r) => [r.tags.join(p.delimiter)] });
-    const colliding = groups.filter((g) => g.includes(p.delimiter) || g !== g.trim() || g === '');
-    const noId = records.filter((r) => r.node.id === '').map((r) => r.node.id);
-    return {
-      output: table,
-      losses: [
-        ...losses,
-        loss('identity-collision', 'drop', [...new Set(colliding)], `${colliding.length} group id(s) contain the delimiter '${p.delimiter}', have surrounding spaces or are empty, and would not read back`),
-        loss('identity-collision', 'drop', noId, 'an item with an empty id cannot be written as a row'),
-      ],
-    };
+    return { output: table };
   },
 });

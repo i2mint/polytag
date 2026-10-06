@@ -12,14 +12,19 @@
  * `food/italian` and `quick/italian` as two tags). Both read the records shape (an array, or
  * under `rootKey` where the format needs a table at the top, as TOML does) and the map shape
  * (`{ carbonara: [italian, quick] }`).
+ *
+ * `spaces` maps further list fields to named group spaces over the same records (an item's
+ * `tags` and its `collections`): they are read into `ParseResult.spaces`, not the payload,
+ * and written from `SerialiseContext.spaces` (flat lists of each record's groups there).
  */
 
 import { z } from 'zod';
 import { isPlainObject } from '../formats/index.js';
-import { type Detection, defineGrammar, type GrammarCodec, noDetection } from '../grammar.js';
+import { type Detection, defineGrammar, type GrammarCodec, noDetection, type ParseResult } from '../grammar.js';
 import type { GrammarCapabilities } from '../loss.js';
-import { createSpaceBuilder } from './shared/builder.js';
-import { type PathOptions, createFlatReader, flatRecords } from './shared/flat.js';
+import type { SpaceSnapshot } from '../model/snapshot.js';
+import { createSpaceBuilder, seg, type SpaceBuilder } from './shared/builder.js';
+import { type PathOptions, createFlatReader, flatPlan, flatRecords } from './shared/flat.js';
 import { coerceString, own, readNodeData, type RecordLayout, writeRecord } from './shared/records.js';
 import { LEXICON, dominantSeparator, inLexicon, isScalar, listFields, pickIdKey, recordArray } from './shared/shape.js';
 
@@ -36,6 +41,8 @@ const baseParams = {
   shape: z.enum(['records', 'map']).default('records'),
   /** Key the records array is written under when the format cannot hold a top-level array (TOML). */
   rootKey: z.string().min(1).default('items'),
+  /** Further group spaces: space name → the record field listing the record's groups there. */
+  spaces: z.record(z.string(), z.string().min(1)).default({}),
 };
 
 /** Params of `tags-array`. */
@@ -72,6 +79,9 @@ const PATHS: GrammarCapabilities = { ...FLAT, nestedGroups: 'native', groupsMult
 
 type CommonParams = TagsArrayParams & Partial<Pick<TagPathsParams, 'separator' | 'mode'>>;
 
+/** A URL (`scheme://`): a list of these is payload, not tags. */
+const URL_LIKE = /^[a-z][a-z0-9+.-]*:\/\//i;
+
 function itemTagsGrammar<P extends CommonParams>(options: {
   id: 'tags-array' | 'tag-paths';
   label: string;
@@ -81,7 +91,8 @@ function itemTagsGrammar<P extends CommonParams>(options: {
   pathsOf: (p: P) => PathOptions | undefined;
 }): GrammarCodec<P> {
   const { id, pathsOf } = options;
-  const layoutOf = (p: P): RecordLayout => ({ idKey: p.idKey, labelKey: p.labelKey, structural: [p.tagsKey] });
+  const paths = id === 'tag-paths';
+  const layoutOf = (p: P): RecordLayout => ({ idKey: p.idKey, labelKey: p.labelKey, structural: [p.tagsKey, ...Object.values(p.spaces)] });
 
   return defineGrammar<P>({
     id,
@@ -94,27 +105,36 @@ function itemTagsGrammar<P extends CommonParams>(options: {
 
     detect(input): Detection<P> {
       const found = recordArray(input);
-      const paths = id === 'tag-paths';
-      const judge = (tags: readonly string[]): { sep: string; pathScore: number } => {
+      const judge = (tags: readonly string[]): { sep: string; pathScore: number; urlShare: number } => {
         const { separator, share } = dominantSeparator(tags);
-        return { sep: separator, pathScore: share };
+        return { sep: separator, pathScore: share, urlShare: tags.length ? tags.filter((t) => URL_LIKE.test(t)).length / tags.length : 0 };
       };
       if (found && found.array.length && found.array.every((r) => isPlainObject(r) || typeof r === 'string')) {
         const objects = found.array.filter(isPlainObject);
-        const [field] = listFields(objects);
+        const fields = listFields(objects);
+        const [field] = fields;
         if (!field) return noDetection();
         const idKey = pickIdKey(objects, [field.key]);
-        const { sep, pathScore } = judge(field.values);
-        const structural = field.coverage * (paths ? Math.min(1, pathScore / 0.3) : 1 - Math.min(1, pathScore / 0.3) * 0.8);
-        const name = inLexicon(field.key, LEXICON.tags) ? 1 : 0.3 + 0.4 * field.repetition;
+        const { sep, pathScore, urlShare } = judge(field.values);
+        const named = inLexicon(field.key, LEXICON.tags);
+        let structural = field.coverage * (paths ? Math.min(1, pathScore / 0.3) : 1 - Math.min(1, pathScore / 0.3) * 0.8);
+        if (urlShare > 0.3) structural *= 0.2;
+        const name = named ? 1 : inLexicon(field.key, LEXICON.children) ? 0 : 0.3 + 0.4 * field.repetition;
         const integrity = idKey ? 1 : 0.4;
+        const others = fields.slice(1).filter((f) => f.repetition > 0 || inLexicon(f.key, LEXICON.tags));
         const evidence = [
           `${found.array.length} records${found.key ? ` under '${found.key}'` : ''}; '${field.key}' is a list in ${Math.round(field.coverage * 100)}% of them`,
           ...(paths || pathScore ? [`${Math.round(pathScore * 100)}% of tags contain '${sep}'`] : []),
+          ...(urlShare > 0.3 ? [`${Math.round(urlShare * 100)}% of the values are URLs (payload, not tags?)`] : []),
           idKey ? `'${idKey}' is a unique id` : 'no unique id field',
+          ...others.map((f) => `'${f.key}' is another list field`),
+        ];
+        const ambiguity = [
+          ...(named ? [] : [`'${field.key}' is not a tag-like field name: are its values groups or payload?`]),
+          ...others.map((f) => `'${f.key}' also lists values: another group space (params.spaces) or payload?`),
         ];
         const suggested = { tagsKey: field.key, ...(idKey ? { idKey } : {}), ...(found.key ? { rootKey: found.key } : {}), ...(paths ? { separator: sep } : {}) };
-        return { score: 0.5 * structural + 0.3 * name + 0.2 * integrity, evidence, suggestedParams: suggested as Partial<P> };
+        return { score: 0.5 * structural + 0.3 * name + 0.2 * integrity, evidence, suggestedParams: suggested as Partial<P>, ambiguity };
       }
       if (isPlainObject(input)) {
         // Map shape: { item: [groups] }. Keys are items; tags repeat and are rarely keys themselves.
@@ -124,10 +144,11 @@ function itemTagsGrammar<P extends CommonParams>(options: {
         const distinct = new Set(values);
         const keysAsValues = entries.filter(([k]) => distinct.has(k)).length / entries.length;
         const empties = entries.filter(([, v]) => !v || !(v as unknown[]).length).length;
-        const { sep, pathScore } = judge(values);
+        const { sep, pathScore, urlShare } = judge(values);
         // Items outnumber their groups; equal counts are ambiguous with a group → members map.
         const itemSide = Math.min(1, (entries.length > distinct.size ? 1 : entries.length === distinct.size ? 0.6 : 0.3) + (empties ? 0.2 : 0));
-        const structural = (1 - keysAsValues) * itemSide * (paths ? Math.min(1, pathScore / 0.3) : 1 - Math.min(1, pathScore / 0.3) * 0.8);
+        let structural = (1 - keysAsValues) * itemSide * (paths ? Math.min(1, pathScore / 0.3) : 1 - Math.min(1, pathScore / 0.3) * 0.8);
+        if (urlShare > 0.3) structural *= 0.2;
         const evidence = [
           `a map of ${entries.length} keys to lists (${distinct.size} distinct values, ${Math.round(keysAsValues * 100)}% of keys are also values)`,
           ...(empties ? [`${empties} key(s) with an empty list (orphan items)`] : []),
@@ -139,40 +160,45 @@ function itemTagsGrammar<P extends CommonParams>(options: {
       return noDetection();
     },
 
-    parse(input, p) {
+    parse(input, p): ParseResult {
       const builder = createSpaceBuilder();
       const reader = createFlatReader(builder, pathsOf(p));
+      const extra = Object.entries(p.spaces).map(([name, field]) => {
+        const b = createSpaceBuilder();
+        return { name, field, builder: b, reader: createFlatReader(b, pathsOf(p)) };
+      });
       const layout = layoutOf(p);
-      const readTags = (raw: unknown, item: string, path: string): string[] => {
+      const readTags = (raw: unknown, item: string, path: string, key: string, into: SpaceBuilder = builder): string[] => {
         if (raw === undefined || raw === null) return [];
         if (typeof raw === 'string') {
-          builder.diag({ severity: 'warning', code: 'shape', message: `'${p.tagsKey}' is a string, read as one tag`, path, ids: [item] });
+          into.diag({ severity: 'warning', code: 'shape', message: `'${key}' is a string, read as one tag`, path, ids: [item] });
           return [raw];
         }
         if (!Array.isArray(raw)) {
-          builder.diag({ severity: 'warning', code: 'ignored-field', message: `'${p.tagsKey}' is not a list; ignored`, path, ids: [item] });
+          into.diag({ severity: 'warning', code: 'ignored-field', message: `'${key}' is not a list; ignored`, path, ids: [item] });
           return [];
         }
         return raw.flatMap((t, i) => {
           if (t === null || t === undefined) {
-            builder.diag({ severity: 'info', code: 'empty-token', message: 'an empty tag was skipped', path: `${path}/${i}`, ids: [item] });
+            into.diag({ severity: 'info', code: 'empty-token', message: 'an empty tag was skipped', path: `${path}/${i}`, ids: [item] });
             return [];
           }
-          const s = coerceString(t, 'tag', `${path}/${i}`, builder);
-          if (s === undefined) builder.diag({ severity: 'warning', code: 'ignored-field', message: 'a tag is not a scalar; ignored', path: `${path}/${i}`, ids: [item] });
+          const s = coerceString(t, 'tag', `${path}/${i}`, into);
+          if (s === undefined) into.diag({ severity: 'warning', code: 'ignored-field', message: 'a tag is not a scalar; ignored', path: `${path}/${i}`, ids: [item] });
           return s === undefined ? [] : [s];
         });
       };
 
       const found = p.shape === 'records' || !isPlainObject(input) ? recordArray(input, p.rootKey) : undefined;
       if (found) {
-        for (const [k, v] of found.rest) builder.leftover(`/${k}`, v);
-        const base = found.key !== undefined ? `/${found.key}` : '';
+        for (const [k, v] of found.rest) builder.leftover(`/${seg(k)}`, v);
+        const base = found.key !== undefined ? `/${seg(found.key)}` : '';
         found.array.forEach((record, i) => {
           const path = `${base}/${i}`;
           if (isScalar(record)) {
             const item = coerceString(record, 'id', path, builder)!;
             builder.node(item);
+            builder.record(item);
             return;
           }
           if (!isPlainObject(record)) {
@@ -180,33 +206,59 @@ function itemTagsGrammar<P extends CommonParams>(options: {
             builder.leftover(path, record);
             return;
           }
-          const item = coerceString(own(record, p.idKey), 'id', `${path}/${p.idKey}`, builder);
+          const item = coerceString(own(record, p.idKey), 'id', `${path}/${seg(p.idKey)}`, builder);
           if (item === undefined) {
             builder.diag({ severity: 'error', code: 'missing-id', message: `record has no '${p.idKey}'; skipped`, path, hint: 'set the idKey param' });
             builder.leftover(path, record);
             return;
           }
           builder.node(item, readNodeData(record, layout, path, builder), path);
-          reader.memberships(item, readTags(own(record, p.tagsKey), item, `${path}/${p.tagsKey}`), `${path}/${p.tagsKey}`);
+          builder.record(item);
+          const tagsPath = `${path}/${seg(p.tagsKey)}`;
+          reader.memberships(item, readTags(own(record, p.tagsKey), item, tagsPath, p.tagsKey), tagsPath);
+          for (const x of extra) {
+            const at = `${path}/${seg(x.field)}`;
+            x.builder.node(item);
+            x.reader.memberships(item, readTags(own(record, x.field), item, at, x.field, x.builder), at);
+          }
         });
       } else if (isPlainObject(input)) {
         for (const [item, raw] of Object.entries(input)) {
           builder.node(item);
-          reader.memberships(item, readTags(raw, item, `/${item}`), `/${item}`);
+          builder.record(item);
+          reader.memberships(item, readTags(raw, item, `/${seg(item)}`, p.tagsKey), `/${seg(item)}`);
         }
       } else {
         builder.diag({ severity: 'error', code: 'shape', message: `expected a list of records or a map of item → ${p.tagsKey}`, path: '' });
         builder.leftover('', input);
       }
-      return builder.build();
+      if (!extra.length) return builder.build();
+      const spaces: Record<string, SpaceSnapshot> = {};
+      for (const x of extra) {
+        const built = x.builder.build();
+        spaces[x.name] = built.space;
+        for (const d of built.diagnostics) builder.diag(d);
+      }
+      return builder.build({ spaces });
     },
 
+    plan: (space, p) => flatPlan(space, { paths: pathsOf(p) }),
+
     write(space, p, ctx) {
-      const { records, losses } = flatRecords(space, pathsOf(p));
-      if (p.shape === 'map') return { output: Object.fromEntries(records.map((r) => [r.node.id, [...r.tags]])), losses };
+      const { records } = flatRecords(space, pathsOf(p));
+      if (p.shape === 'map') return { output: Object.fromEntries(records.map((r) => [r.node.id, [...r.tags]])) };
       const layout = layoutOf(p);
-      const array = records.map((r) => writeRecord(r.node, layout, [[p.tagsKey, [...r.tags]]]));
-      return { output: ctx.rootArray === false ? Object.fromEntries([[p.rootKey, array]]) : array, losses };
+      // Further spaces: each record's groups there, as a flat list.
+      const extra = Object.entries(p.spaces).map(([name, field]) => {
+        const other = ctx.spaces?.[name];
+        const tags = new Map<string, string[]>();
+        for (const e of other?.edges ?? []) tags.set(e.child, [...(tags.get(e.child) ?? []), e.parent]);
+        return { field, tags };
+      });
+      const array = records.map((r) =>
+        writeRecord(r.node, layout, [[p.tagsKey, [...r.tags]], ...extra.map(({ field, tags }) => [field, tags.get(r.node.id) ?? []] as [string, unknown])]),
+      );
+      return { output: ctx.rootArray === false ? Object.fromEntries([[p.rootKey, array]]) : array };
     },
   });
 }
