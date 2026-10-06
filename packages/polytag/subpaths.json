@@ -1,0 +1,6 @@
+{
+  ".": { "source": "src/index.ts", "tagAware": true },
+  "./formats": { "source": "src/formats/index.ts" },
+  "./backends": { "source": "src/backends/index.ts" },
+  "./views": { "source": "src/views/index.ts" }
+}

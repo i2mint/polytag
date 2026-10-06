@@ -1,0 +1,9 @@
+{
+  "name": "fixture-pkg-clean",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "import": { "types": "./out/index.d.ts", "default": "./out/index.js" } },
+    "./views": { "import": { "types": "./out/views.d.ts", "default": "./out/views.js" } }
+  }
+}

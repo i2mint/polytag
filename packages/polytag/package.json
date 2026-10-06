@@ -1,0 +1,91 @@
+{
+  "name": "polytag",
+  "version": "0.0.0",
+  "private": false,
+  "description": "Headless CRUD for tag-based collections: formats, backend and view menus over zodal and zodal-groups",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/i2mint/polytag.git",
+    "directory": "packages/polytag"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "formats": [
+        "./dist/formats.d.ts"
+      ],
+      "backends": [
+        "./dist/backends.d.ts"
+      ],
+      "views": [
+        "./dist/views.d.ts"
+      ]
+    }
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./formats": {
+      "import": {
+        "types": "./dist/formats.d.ts",
+        "default": "./dist/formats.js"
+      },
+      "require": {
+        "types": "./dist/formats.d.cts",
+        "default": "./dist/formats.cjs"
+      }
+    },
+    "./backends": {
+      "import": {
+        "types": "./dist/backends.d.ts",
+        "default": "./dist/backends.js"
+      },
+      "require": {
+        "types": "./dist/backends.d.cts",
+        "default": "./dist/backends.cjs"
+      }
+    },
+    "./views": {
+      "import": {
+        "types": "./dist/views.d.ts",
+        "default": "./dist/views.js"
+      },
+      "require": {
+        "types": "./dist/views.d.cts",
+        "default": "./dist/views.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "prepublishOnly": "pnpm build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

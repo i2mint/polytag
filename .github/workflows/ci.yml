@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to a PR cancels the older run. Every push to main gets its own group
+# (keyed by sha), so a main run is never cancelled or replaced while pending; the publish
+# job below has its own non-cancelling group so releases never overlap.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      # ADR 0001 §Consequences: the tag-agnostic subpaths (polytag/formats, /backends,
+      # /views) must never import @zodal/groups-*. Bundles each with esbuild and reads
+      # the metafile.
+      - name: Boundary check
+        run: node scripts/check-boundaries.mjs
+
+  gate:
+    name: Release gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+      force: ${{ steps.decide.outputs.force }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # the subjects since the last release tag
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      # Publish iff a commit SUBJECT since the last `v*` tag contains `[publish]` (bodies
+      # never count) AND a public package's version is not on the registry yet. Reading
+      # the whole range means a multi-commit push, or a cancelled release, is not lost;
+      # a marker without a version bump publishes nothing and says so in a notice.
+      # Subjects are read with git, never interpolated from the event payload.
+      - id: decide
+        run: node scripts/release-gate.mjs
+
+  publish:
+    name: Publish
+    needs: [validate, gate]
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    # Required reviewers on this environment (a repo setting) make every publish wait for
+    # an owner's approval.
+    environment: npm-publish
+    # Releases never overlap and a running one is never cancelled.
+    concurrency:
+      group: npm-publish-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write # push the release tag with GITHUB_TOKEN
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Publish packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          FORCE_PUBLISH: ${{ needs.gate.outputs.force }}
+        # Always `pnpm publish`, never `npm publish`: only pnpm rewrites `workspace:*`
+        # ranges to real versions. No `|| true`: an expired NPM_TOKEN makes the registry
+        # answer 404 to the PUT, and swallowing that exit code would report a release that
+        # never reached npm as green. `pnpm -r publish` already skips a version the
+        # registry has, so re-running stays idempotent without hiding errors. Private
+        # workspace packages (the root, apps/playground) are skipped by pnpm.
+        run: |
+          set -euo pipefail
+          FORCE=""
+          if [ "$FORCE_PUBLISH" = "true" ]; then
+            FORCE="--no-git-checks"
+          fi
+          pnpm -r publish --access public $FORCE
+
+      # A publish is only real if the registry serves it. Ask the registry, don't infer it
+      # from an exit code. A brand-new package name can 404 for minutes after a successful
+      # publish, so retry before concluding it failed.
+      - name: Verify the registry serves this version
+        run: |
+          set -euo pipefail
+          SPECS=$(node -e '
+            const fs = require("fs");
+            for (const d of fs.readdirSync("packages")) {
+              const p = JSON.parse(fs.readFileSync(`packages/${d}/package.json`, "utf8"));
+              if (!p.private) console.log(`${p.name}@${p.version}`);
+            }')
+          for spec in $SPECS; do
+            version="${spec##*@}"
+            confirmed=""
+            for attempt in $(seq 1 20); do
+              got=$(npm view "$spec" version 2>/dev/null || true)
+              if [ "$got" = "$version" ]; then
+                echo "$spec confirmed on the registry (attempt ${attempt})"
+                confirmed=1
+                break
+              fi
+              echo "$spec not visible yet (attempt ${attempt}/20)"
+              sleep 15
+            done
+            if [ -z "$confirmed" ]; then
+              echo "::error::$spec never appeared on the registry -- the publish failed."
+              exit 1
+            fi
+          done
+
+      - name: Tag release
+        # The tag is derived from packages/polytag, the one published package. Pushed with
+        # the job's GITHUB_TOKEN (persisted by actions/checkout). A failed push fails the
+        # job: a version on npm without its tag must not look green.
+        run: |
+          set -euo pipefail
+          VERSION=$(node -e "console.log(require('./packages/polytag/package.json').version)")
+          TAG="v${VERSION}"
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "::notice::${TAG} already exists on origin; not re-tagging."
+          elif [ "$status" -eq 2 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "refs/tags/${TAG}"
+          else
+            echo "::error::git ls-remote failed (exit ${status}); cannot tell whether ${TAG} exists."
+            exit 1
+          fi

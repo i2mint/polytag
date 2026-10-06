@@ -1,0 +1,19 @@
+{
+  "name": "polytag-monorepo",
+  "private": true,
+  "scripts": {
+    "build": "turbo build",
+    "test": "turbo test && pnpm run test:scripts",
+    "test:scripts": "vitest run --config scripts/vitest.config.mjs",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "turbo": "^2.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "packageManager": "pnpm@9.15.0"
+}
