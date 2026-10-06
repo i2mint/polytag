@@ -49,7 +49,7 @@ export {
 export { json, jsonc, type JsonOptions } from './json.js';
 export { yaml, type YamlOptions } from './yaml.js';
 export { toml, type TomlOptions } from './toml.js';
-export { csv, tsv, type CsvOptions } from './csv.js';
+export { DEFAULT_MAX_LINE_LENGTH, csv, tsv, type CsvOptions } from './csv.js';
 export { hashComments, slashComments, tomlComments, yamlComments } from './comments.js';
 export { findPaths, isPlainObject, stripValues } from './values.js';
 export type { Registry, RegistryOptions } from '../internal/registry.js';

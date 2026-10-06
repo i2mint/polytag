@@ -21,7 +21,34 @@ export interface CsvOptions {
   readonly delimiter?: string;
   /** Escape cells a spreadsheet would run as formulas (and unescape them on read). Default `true`. */
   readonly escapeFormulae?: boolean;
+  /**
+   * Refuse to decode a text with a line longer than this (`FormatError` code `limit`).
+   * papaparse is quadratic on a long line of quoted fields (1.6 MB ≈ 16 s). Default 65 536.
+   */
+  readonly maxLineLength?: number;
 }
+
+/** The default {@link CsvOptions.maxLineLength}. */
+export const DEFAULT_MAX_LINE_LENGTH = 64 * 1024;
+
+/** The length of the longest line of `text` (linear scan). */
+function longestLine(text: string): number {
+  let longest = 0;
+  let start = 0;
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) {
+    longest = Math.max(longest, i - start);
+    start = i + 1;
+  }
+  return Math.max(longest, text.length - start);
+}
+
+/**
+ * Parse settings shared by decode, dialect and locate. Only truly empty lines are skipped
+ * (`'greedy'` would also drop a row whose only cell is whitespace, a valid id); rows whose
+ * every cell is empty are then dropped by {@link nonBlankRows}.
+ */
+const SKIP_EMPTY = true;
+const nonBlankRows = (rows: string[][]): string[][] => rows.filter((r) => r.some((c) => c !== ''));
 
 type Papa = typeof import('papaparse');
 let papaLib: Promise<Papa> | undefined;
@@ -30,8 +57,9 @@ export const loadPapa = (): Promise<Papa> => (papaLib ??= import('papaparse').th
 
 /** A cell a spreadsheet would run (after any leading apostrophes). */
 const FORMULA = /^'*[=+\-@\t\r]/;
+const ESCAPED = /^'+[=+\-@\t\r]/;
 const escapeCell = (cell: string): string => (FORMULA.test(cell) ? `'${cell}` : cell);
-const unescapeCell = (cell: string): string => (/^'+[=+\-@\t\r]/.test(cell) ? cell.slice(1) : cell);
+const unescapeCell = (cell: string): string => (ESCAPED.test(cell) ? cell.slice(1) : cell);
 
 /** Occurrences of `delimiter` outside double quotes in one line. */
 function countOutsideQuotes(line: string, delimiter: string): number {
@@ -81,8 +109,12 @@ export async function csvRowLine(text: string, row: number, delimiter?: string):
   let previous = 0;
   papa.parse<string[]>(body, {
     delimiter: delimiter ?? '',
-    skipEmptyLines: 'greedy',
+    skipEmptyLines: SKIP_EMPTY,
     step(result, parser) {
+      if (!result.data.some((c) => c !== '')) {
+        previous = result.meta.cursor;
+        return;
+      }
       seen += 1;
       if (seen === row) {
         start = previous;
@@ -116,21 +148,35 @@ function delimitedFormat(id: 'csv' | 'tsv', defaults: { read: string; write: str
       );
       return cells;
     },
-    async load({ delimiter, escapeFormulae = true }: CsvOptions = {}): Promise<FormatCodec<Table>> {
+    async load({ delimiter, escapeFormulae = true, maxLineLength = DEFAULT_MAX_LINE_LENGTH }: CsvOptions = {}): Promise<FormatCodec<Table>> {
       const papa = await loadPapa();
-      const read = (text: string) =>
-        papa.parse<string[]>(text.replace(/^﻿/, ''), { delimiter: delimiter ?? defaults.read, skipEmptyLines: 'greedy' });
+      const read = (text: string): string[][] => {
+        const longest = longestLine(text);
+        if (longest > maxLineLength) {
+          throw new FormatError(id, `a line is ${longest} characters long, more than maxLineLength (${maxLineLength}); raise it for a trusted file`, { code: 'limit' });
+        }
+        const result = papa.parse<string[]>(text.replace(/^﻿/, ''), { delimiter: delimiter ?? defaults.read, skipEmptyLines: SKIP_EMPTY });
+        const fatal = result.errors.find((e) => e.code !== 'UndetectableDelimiter');
+        if (fatal) throw new FormatError(id, fatal.message, { line: fatal.row !== undefined ? fatal.row + 1 : undefined, cause: fatal });
+        return nonBlankRows(result.data);
+      };
       return {
         format: id,
         decode(text) {
-          const result = read(text);
-          const fatal = result.errors.find((e) => e.code !== 'UndetectableDelimiter');
-          if (fatal) {
-            throw new FormatError(id, fatal.message, { line: fatal.row !== undefined ? fatal.row + 1 : undefined, cause: fatal });
-          }
-          const data = escapeFormulae ? result.data.map((row) => row.map(unescapeCell)) : result.data;
-          const [columns = [], ...rows] = data;
+          const data = read(text);
+          const [columns = [], ...rows] = escapeFormulae ? data.map((row) => row.map(unescapeCell)) : data;
           return { columns, rows };
+        },
+        warnings(text) {
+          if (!escapeFormulae) return [];
+          const [header = [], ...rows] = read(text);
+          return [header, ...rows].flatMap((row, r) =>
+            row.flatMap((cell, c) =>
+              ESCAPED.test(cell)
+                ? [{ code: 'unescaped' as const, message: `a leading ' was removed from ${JSON.stringify(cell)} (formula escaping); read with escapeFormulae: false to keep it`, at: { row: r + 1, column: unescapeCell(header[c] ?? String(c + 1)) } }]
+                : [],
+            ),
+          );
         },
         encode(value) {
           if (!isTable(value)) {
@@ -145,7 +191,7 @@ function delimitedFormat(id: 'csv' | 'tsv', defaults: { read: string; write: str
         },
         dialect(text) {
           if (id === 'tsv' || delimiter) return {};
-          const guessed = papa.parse<string[]>(text.replace(/^﻿/, '').slice(0, 64 * 1024), { delimiter: '', preview: 20, skipEmptyLines: 'greedy' }).meta.delimiter;
+          const guessed = papa.parse<string[]>(text.replace(/^﻿/, '').slice(0, 64 * 1024), { delimiter: '', preview: 20, skipEmptyLines: SKIP_EMPTY }).meta.delimiter;
           return guessed && guessed !== defaults.write ? { delimiter: guessed } : {};
         },
       };

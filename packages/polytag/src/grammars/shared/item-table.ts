@@ -54,7 +54,7 @@ export function readItemRow(row: readonly string[], table: Table, cols: ItemColu
 /** Write item rows: id, label, family and payload columns, then `membership` columns. */
 export function writeItemTable(
   records: readonly FlatRecord[],
-  keys: { idKey: string; labelKey: string },
+  keys: { idKey: string; labelKey: string; reserved?: readonly string[] },
   membership: { readonly columns: readonly string[]; readonly cells: (r: FlatRecord) => readonly string[] },
   { spreadable }: { readonly spreadable?: (nodes: readonly SnapshotNode[], columns: readonly string[]) => boolean } = {},
 ): { table: Table; payloadColumns: readonly string[] } {
@@ -62,7 +62,10 @@ export function writeItemTable(
   const hasLabel = nodes.some((n) => n.label !== undefined);
   const hasFamily = nodes.some((n) => n.family !== undefined);
   const base = [keys.idKey, ...(hasLabel ? [keys.labelKey] : []), ...(hasFamily ? [FAMILY_KEY] : [])];
-  const payload = payloadColumns(nodes, [...base, ...membership.columns], spreadable && ((columns) => spreadable(nodes, columns)));
+  // Every structural column name is reserved, present or not: a payload field named `label`
+  // must not read back as the label when the label column happens to be absent.
+  const reserved = [keys.idKey, keys.labelKey, FAMILY_KEY, PAYLOAD_KEY, ...(keys.reserved ?? []), ...membership.columns];
+  const payload = payloadColumns(nodes, reserved, spreadable && ((columns) => spreadable(nodes, columns)));
   const rows = records.map((r) => [
     r.node.id,
     ...(hasLabel ? [r.node.label ?? ''] : []),

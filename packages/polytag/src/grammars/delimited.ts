@@ -136,7 +136,7 @@ export const delimited = defineGrammar<DelimitedParams>({
 
   write(space, p) {
     const { records } = flatRecords(space, pathsOf(p));
-    const { table } = writeItemTable(records, p, { columns: [p.tagsKey], cells: (r) => [r.tags.join(p.delimiter)] });
+    const { table } = writeItemTable(records, { ...p, reserved: [p.tagsKey] }, { columns: [p.tagsKey], cells: (r) => [r.tags.join(p.delimiter)] });
     return { output: table };
   },
 });

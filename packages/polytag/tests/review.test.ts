@@ -67,7 +67,8 @@ describe('B1 import plan', () => {
       ['contains:g/c', 'create'],
     ]);
     const ba = (await readText('{"g":["b","a"]}', { format: 'json', grammar: 'members-map' })).space;
-    expect(planImport(ab, ba).edges.filter((e) => e.action === 'conflict').map((e) => e.changes)).toEqual([['order'], ['order']]);
+    // A swap moves one edge (the minimal reorder), not both.
+    expect(planImport(ab, ba).edges.filter((e) => e.action === 'conflict').map((e) => [e.id, e.changes])).toEqual([['contains:g/b', ['order']]]);
   });
 
   it("a field the source does not carry is kept, never cleared (members-map with onConflict 'update')", async () => {

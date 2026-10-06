@@ -21,7 +21,8 @@
 import { z } from 'zod';
 import { isPlainObject } from '../formats/index.js';
 import { type Detection, defineGrammar, type GrammarCodec, noDetection, type ParseResult } from '../grammar.js';
-import type { GrammarCapabilities } from '../loss.js';
+import { type GrammarCapabilities, type Loss, type Reduction, loss, reduce } from '../loss.js';
+import { hasNodeMeta } from '../model/features.js';
 import type { SpaceSnapshot } from '../model/snapshot.js';
 import { createSpaceBuilder, seg, type SpaceBuilder } from './shared/builder.js';
 import { type PathOptions, createFlatReader, flatPlan, flatRecords } from './shared/flat.js';
@@ -45,18 +46,30 @@ const baseParams = {
   spaces: z.record(z.string(), z.string().min(1)).default({}),
 };
 
+/** Space fields must be distinct from each other and from the tags, id and label fields. */
+const checkSpaces = (p: { idKey: string; tagsKey: string; labelKey: string; spaces: Record<string, string> }, ctx: z.RefinementCtx): void => {
+  const fields = Object.values(p.spaces);
+  for (const [name, field] of Object.entries(p.spaces)) {
+    const clash = ([['tagsKey', p.tagsKey], ['idKey', p.idKey], ['labelKey', p.labelKey]] as const).find(([, v]) => v === field);
+    if (clash) ctx.addIssue({ code: 'custom', path: ['spaces', name], message: `spaces.${name} is '${field}', which is the ${clash[0]} field` });
+    if (fields.indexOf(field) !== fields.lastIndexOf(field)) ctx.addIssue({ code: 'custom', path: ['spaces', name], message: `field '${field}' is used by more than one space` });
+  }
+};
+
 /** Params of `tags-array`. */
-export const tagsArrayParams = z.object(baseParams);
+export const tagsArrayParams = z.object(baseParams).superRefine(checkSpaces);
 export type TagsArrayParams = z.infer<typeof tagsArrayParams>;
 
 /** Params of `tag-paths`. */
-export const tagPathsParams = z.object({
-  ...baseParams,
-  /** Path separator: `/` (Obsidian), `|` (Lightroom), `:` (Hydrus namespaces). */
-  separator: z.string().min(1).default('/'),
-  /** `leafOnly`: write the path to each group; `materialised`: also every ancestor path (Lightroom). */
-  mode: z.enum(['leafOnly', 'materialised']).default('leafOnly'),
-});
+export const tagPathsParams = z
+  .object({
+    ...baseParams,
+    /** Path separator: `/` (Obsidian), `|` (Lightroom), `:` (Hydrus namespaces). */
+    separator: z.string().min(1).default('/'),
+    /** `leafOnly`: write the path to each group; `materialised`: also every ancestor path (Lightroom). */
+    mode: z.enum(['leafOnly', 'materialised']).default('leafOnly'),
+  })
+  .superRefine(checkSpaces);
 export type TagPathsParams = z.infer<typeof tagPathsParams>;
 
 /** Item-major, no nesting. */
@@ -242,21 +255,58 @@ function itemTagsGrammar<P extends CommonParams>(options: {
       return builder.build({ spaces });
     },
 
-    plan: (space, p) => flatPlan(space, { paths: pathsOf(p) }),
+    plan(space, p, ctx): Reduction {
+      const primary = flatPlan(space, { paths: pathsOf(p) });
+      const names = Object.keys(p.spaces).filter((name) => ctx.spaces?.[name]);
+      if (!names.length) return primary;
+      // Secondary spaces are written as each record's groups there: plan them the same way.
+      const groups = new Set(primary.space.edges.map((e) => e.parent));
+      const records = primary.space.nodes.filter((n) => !groups.has(n.id)).map((n) => n.id);
+      const isRecord = new Set(records);
+      const losses: Loss[] = [...primary.losses];
+      const spaces: Record<string, SpaceSnapshot> = {};
+      for (const name of names) {
+        const sec = ctx.spaces![name]!;
+        const tagged = (l: Loss): Loss => ({ ...l, space: name });
+        if (p.shape === 'map') {
+          losses.push(tagged(loss('membership', 'drop', sec.edges.map((e) => e.id), `the map shape has no field for the '${name}' space; its ${sec.edges.length} membership(s) are not written`)));
+          continue;
+        }
+        const reduced = reduce(sec, options.caps, { isMembership: ctx.isMembership });
+        const secGroups = new Set(reduced.space.edges.map((e) => e.parent));
+        const homeless = reduced.space.edges.filter((e) => !secGroups.has(e.child) && !isRecord.has(e.child)).map((e) => e.id);
+        const out = new Set(homeless);
+        const planned = flatPlan({ nodes: reduced.space.nodes, edges: reduced.space.edges.filter((e) => !out.has(e.id)) }, { paths: pathsOf(p) });
+        // The reader gives every record (bare), then the groups the memberships name.
+        const kept = [...new Set(planned.space.edges.map((e) => e.parent))].filter((g) => !isRecord.has(g));
+        const nodes = [...records, ...kept].map((id) => ({ id }));
+        const written = new Set(nodes.map((n) => n.id));
+        const content = reduced.space.nodes.filter((n) => isRecord.has(n.id) && hasNodeMeta(n)).map((n) => n.id);
+        const unwritten = sec.nodes.filter((n) => !written.has(n.id)).map((n) => n.id);
+        losses.push(
+          ...reduced.losses.map(tagged),
+          tagged(loss('membership', 'drop', homeless, `${homeless.length} membership(s) of nodes that are not records of the primary space have no record to be written on`)),
+          ...planned.losses.map(tagged),
+          tagged(loss('item-meta', 'drop', content, `the content of ${content.length} record(s) in a secondary space is not written (records carry their content in the primary space)`)),
+          tagged(loss('isolated-node', 'drop', unwritten, `${unwritten.length} node(s) neither a record nor a group with members are not written`)),
+        );
+        spaces[name] = { nodes, edges: planned.space.edges };
+      }
+      return { space: primary.space, losses, spaces };
+    },
 
     write(space, p, ctx) {
       const { records } = flatRecords(space, pathsOf(p));
       if (p.shape === 'map') return { output: Object.fromEntries(records.map((r) => [r.node.id, [...r.tags]])) };
       const layout = layoutOf(p);
-      // Further spaces: each record's groups there, as a flat list.
+      // Further (planned) spaces: each record's groups there, laid out like the primary.
       const extra = Object.entries(p.spaces).map(([name, field]) => {
         const other = ctx.spaces?.[name];
-        const tags = new Map<string, string[]>();
-        for (const e of other?.edges ?? []) tags.set(e.child, [...(tags.get(e.child) ?? []), e.parent]);
+        const tags = new Map<string, readonly string[]>(other ? flatRecords(other, pathsOf(p)).records.map((r) => [r.node.id, r.tags]) : []);
         return { field, tags };
       });
       const array = records.map((r) =>
-        writeRecord(r.node, layout, [[p.tagsKey, [...r.tags]], ...extra.map(({ field, tags }) => [field, tags.get(r.node.id) ?? []] as [string, unknown])]),
+        writeRecord(r.node, layout, [[p.tagsKey, [...r.tags]], ...extra.map(({ field, tags }) => [field, [...(tags.get(r.node.id) ?? [])]] as [string, unknown])]),
       );
       return { output: ctx.rootArray === false ? Object.fromEntries([[p.rootKey, array]]) : array };
     },

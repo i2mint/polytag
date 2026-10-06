@@ -10,8 +10,10 @@ import { describe, expect, it } from 'vitest';
 import { type SpaceSnapshot, assess, createGrammarRegistry, edgeIdMinter, roundTrip } from '../src/index.js';
 
 const TRICKY = ['010', '1e3', 'true', 'null', 'no', 'on', '~', 'a;b', 'a,b', 'a|b', 'a/b', 'a b', ' lead', 'x"y', "it's", 'line\nbreak', 'é', '日本', '🙂', '=1+1', '+cmd', '-2', '@x', '#h', '__proto__', 'constructor', 'toString', 'a:b', '[x]', '{y}', '0x1F', '2024-01-01', 'NaN', 'x'.repeat(300), '-', '*a', '&b', '!t', '%p', 'a\tb', 'a\r\nb', ''];
+TRICKY.push("'=1", "''", "'", "''=x", "'-", 'ref', 'id', 'label', 'groups', 'parent', 'child', 'kind', 'children', 'tags', ' ', '%2F', 'a%3Ab', 'contains:a/b', '\u2028', '\t=x', '-1', '+', '@'); // from the verification's extended fuzz
 const PLAIN = ['food', 'italian', 'veg', 'quick', 'carb', 'marg', 'salad', 'ramen', 'notes', 'g1', 'g2', 'i1', 'i2', 'i3'];
 const PAYLOADS: unknown[] = [undefined, undefined, { n: 1 }, { s: '010' }, { b: true }, { arr: [1, 'a'] }, { nested: { k: 'v' } }, { d: '2024-01-01T00:00:00Z' }, { f: 0.1 }, { empty: '' }, { nul: null }, { nan: Number.NaN }, 'scalar', 42, [1, 2], null, { s: 'true' }];
+PAYLOADS.push({ ref: 'g1' }, { id: 'zz' }, { children: ['x'] }, { tags: ['q'] }, { label: 'L' }, { f: "'=2" }, { k: '=cmd' }, { parent: 'p' }, { order: 'o' }, { deep: { a: { b: { c: { d: [1, { e: null }] } } } } });
 
 function generator(seed: number) {
   let s = seed;
@@ -70,7 +72,7 @@ function generator(seed: number) {
 }
 
 const VARIANTS: Record<string, Record<string, unknown>[]> = {
-  nested: [{}, { multiParent: 'duplicate' }, { multiParent: 'ref' }],
+  nested: [{}, { multiParent: 'duplicate' }, { multiParent: 'ref' }, { maxDepth: 2 }, { multiParent: 'duplicate', maxEntries: 5 }],
   'tag-paths': [{}, { mode: 'materialised' }],
   delimited: [{}, { pathSeparator: '/' }, { delimiter: '|' }],
   'tags-array': [{}, { shape: 'map' }],

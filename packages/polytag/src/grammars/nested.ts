@@ -52,10 +52,11 @@ export const nestedParams = z.object({
   maxEntries: z.number().int().positive().default(50_000),
   /**
    * Deepest nesting written. A member deeper than this is written as a `ref` and started as
-   * its own root entry (parsers and stringifiers recurse; JSON.stringify overflows near a few
-   * thousand levels). Reads back exactly; reported as an `encode`.
+   * its own root entry (parsers and stringifiers recurse: JSON.stringify overflows near a few
+   * thousand levels, the YAML and TOML libraries sooner). Reads back exactly; reported as an
+   * `encode`. Default: {@link DEFAULT_MAX_DEPTH} for the target format.
    */
-  maxDepth: z.number().int().min(1).default(500),
+  maxDepth: z.number().int().min(1).optional(),
 });
 export type NestedParams = z.infer<typeof nestedParams>;
 
@@ -118,6 +119,10 @@ function effectiveMode(p: NestedParams, format: string | undefined, space: Space
   const n = copiesExceed(space, p);
   return n === undefined ? { mode: p.multiParent } : { mode: 'ref', note: `as { ${p.refKey} } entries: copies would exceed maxEntries ${p.maxEntries}` };
 }
+
+/** Default `maxDepth` per target format: what its stringifier and parser can take, with room to spare. */
+export const DEFAULT_MAX_DEPTH: Readonly<Record<string, number>> = { json: 500, jsonc: 500, yaml: 100, toml: 100 };
+const maxDepthFor = (p: NestedParams, format: string | undefined): number => p.maxDepth ?? DEFAULT_MAX_DEPTH[format ?? 'json'] ?? 100;
 
 function capabilities(p: NestedParams, format?: string, space?: SpaceSnapshot): GrammarCapabilities {
   const caps: GrammarCapabilities = { ...BASE, edgeOrder: p.order ? 'group-major' : 'no' };
@@ -196,6 +201,7 @@ function layout(space: SpaceSnapshot, p: NestedParams, ctx: SerialiseContext): {
     const rendered = new Map<string, unknown>();
     const reached = new Set<string>();
     const { mode } = effectiveMode(p, ctx.format, space);
+    const maxDepth = maxDepthFor(p, ctx.format);
     const ref = (id: string): unknown => Object.fromEntries([[p.refKey, id]]);
     const onPath = new Set<string>();
 
@@ -234,7 +240,7 @@ function layout(space: SpaceSnapshot, p: NestedParams, ctx: SerialiseContext): {
           const edge = f.kids[f.i++]!;
           const v = immediate(edge.child);
           if (v !== undefined) f.values.push(v);
-          else if (frames.length >= p.maxDepth) {
+          else if (frames.length >= maxDepth) {
             // Too deep to nest: a ref here, and the member starts its own root entry.
             f.values.push(ref(edge.child));
             deferred.push(edge.id);
@@ -414,7 +420,7 @@ export const nested = defineGrammar<NestedParams>({
     const { deferred } = layout(space, p, ctx);
     return {
       space,
-      losses: [loss('group-edges', 'encode', deferred, `${deferred.length} membership(s) deeper than maxDepth ${p.maxDepth} are written as { ${p.refKey} } entries, their member starting a new root entry`)],
+      losses: [loss('group-edges', 'encode', deferred, `${deferred.length} membership(s) deeper than maxDepth ${maxDepthFor(p, ctx.format)} are written as { ${p.refKey} } entries, their member starting a new root entry`)],
     };
   },
 

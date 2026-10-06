@@ -99,6 +99,8 @@ export interface Loss {
   /** Every affected id (node ids or edge ids; JSON-pointer paths for `format-value`; `line N` for `formatting`). */
   readonly ids: readonly string[];
   readonly message: string;
+  /** The named secondary space the loss is in (record grammars' `spaces`); absent for the primary space. */
+  readonly space?: string;
 }
 
 /** The loss report of writing a space in a grammar (and format). */
@@ -126,6 +128,8 @@ export const loss = (kind: LossKind, severity: LossSeverity, ids: readonly strin
 export interface Reduction {
   readonly space: SpaceSnapshot;
   readonly losses: readonly Loss[];
+  /** Planned secondary spaces, for grammars that write them. */
+  readonly spaces?: Readonly<Record<string, SpaceSnapshot>>;
 }
 
 /** Options of {@link reduce}. */

@@ -29,6 +29,9 @@ export interface SeedOptions {
  * records and their nodes in every space are left bare.
  */
 export function toCollectionSeed(result: Pick<ParseResult, 'space' | 'spaces' | 'records'>, { primary = 'groups' }: SeedOptions = {}): CollectionSeed {
+  if (result.spaces && Object.prototype.hasOwnProperty.call(result.spaces, primary)) {
+    throw new Error(`A secondary space is named '${primary}', which is the primary space's name; pass { primary } with another name.`);
+  }
   const groups = new Set(result.space.edges.map((e) => e.parent));
   const ids = result.records ?? result.space.nodes.filter((n) => !groups.has(n.id)).map((n) => n.id);
   const isRecord = new Set(ids);

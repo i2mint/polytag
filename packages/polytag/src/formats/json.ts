@@ -98,7 +98,7 @@ function duplicateKeys(root: JsonNode | undefined): FormatWarning[] {
       if (!key) continue;
       const k = key.value as string;
       const at = `${path}/${pointerSegment(k)}`;
-      if (seen.has(k)) out.push({ code: 'duplicate-key', message: `duplicate key '${k}'; the last value is kept (JSON parsers differ)`, pointer: at });
+      if (seen.has(k)) out.push({ code: 'duplicate-key', message: `duplicate key '${k}'; the last value is kept (JSON parsers differ)`, at: { pointer: at } });
       seen.add(k);
       if (value) stack.push([value, at]);
     }
@@ -122,10 +122,30 @@ export function jsonOffset(root: JsonNode | undefined, pointer: string): number 
   return node?.offset;
 }
 
-/** The parse tree of a JSON / JSONC text (for locating pointers). */
+/** The parse tree of a JSON / JSONC text (for locating pointers); `undefined` if it is too deep for the (recursive) parser. */
 export async function jsonTree(text: string): Promise<JsonNode | undefined> {
   const lib = await loadJsoncParser();
-  return lib.parseTree(text, [], { allowTrailingComma: true, disallowComments: false });
+  const tree = treeOrDeep(() => lib.parseTree(text, [], { allowTrailingComma: true, disallowComments: false }));
+  return tree === TOO_DEEP ? undefined : tree;
+}
+
+const TOO_DEEP = Symbol('too deep');
+
+/** Run a (recursive) jsonc-parser call; a stack overflow on a very deep document is reported, not thrown. */
+function treeOrDeep<T>(run: () => T): T | typeof TOO_DEEP {
+  try {
+    return run();
+  } catch (error) {
+    if (error instanceof RangeError) return TOO_DEEP;
+    throw error;
+  }
+}
+
+/** Duplicate-key warnings for `text`, or one `unchecked` warning when it is too deep to walk. */
+function duplicateWarnings(lib: JsoncParser, text: string, allowTrailingComma: boolean): FormatWarning[] {
+  const tree = treeOrDeep(() => lib.parseTree(text, [], { allowTrailingComma, disallowComments: !allowTrailingComma }));
+  if (tree === TOO_DEEP) return [{ code: 'unchecked', message: 'too deeply nested to check for duplicate keys', at: { pointer: '' } }];
+  return duplicateKeys(tree);
 }
 
 const VALUE_LIMITS = { null: true, nonFinite: false } as const;
@@ -157,12 +177,12 @@ export const json: FormatDescriptor<unknown, JsonOptions> = {
         if (parsed.ok) return parsed.value;
         const message = parsed.error instanceof Error ? parsed.error.message : String(parsed.error);
         const errors: import('jsonc-parser').ParseError[] = [];
-        lib.parseTree(text, errors, { allowTrailingComma: false, disallowComments: true });
+        treeOrDeep(() => lib.parseTree(text, errors, { allowTrailingComma: false, disallowComments: true }));
         const offset = errors[0]?.offset ?? Number(/position (\d+)/.exec(message)?.[1] ?? Number.NaN);
         throw new FormatError('json', message, { cause: parsed.error, ...(Number.isFinite(offset) ? positionOf(text, offset) : {}) });
       },
       encode: (value) => encodeJson('json', value, indent),
-      warnings: (text) => duplicateKeys(lib.parseTree(text, [], { allowTrailingComma: false })),
+      warnings: (text) => duplicateWarnings(lib, text, false),
     };
   },
 };
@@ -192,7 +212,9 @@ export const jsonc: FormatDescriptor<unknown, JsonOptions> = {
     const lib = await loadJsoncParser();
     const parse = (text: string): { tree: JsonNode | undefined; errors: import('jsonc-parser').ParseError[] } => {
       const errors: import('jsonc-parser').ParseError[] = [];
-      return { tree: lib.parseTree(text, errors, { allowTrailingComma: true, disallowComments: false }), errors };
+      const tree = treeOrDeep(() => lib.parseTree(text, errors, { allowTrailingComma: true, disallowComments: false }));
+      if (tree === TOO_DEEP) throw new FormatError('jsonc', 'too deeply nested for the JSONC parser', { code: 'limit' });
+      return { tree, errors };
     };
     return {
       format: 'jsonc',
@@ -200,10 +222,15 @@ export const jsonc: FormatDescriptor<unknown, JsonOptions> = {
         const { tree, errors } = parse(text);
         const [first] = errors;
         if (first) throw new FormatError('jsonc', lib.printParseErrorCode(first.error), positionOf(text, first.offset));
-        return tree ? valueOf(tree) : undefined;
+        try {
+          return tree ? valueOf(tree) : undefined;
+        } catch (error) {
+          if (error instanceof RangeError) throw new FormatError('jsonc', 'too deeply nested for the JSONC parser', { code: 'limit' });
+          throw error;
+        }
       },
       encode: (value) => encodeJson('jsonc', value, indent),
-      warnings: (text) => duplicateKeys(parse(text).tree),
+      warnings: (text) => duplicateWarnings(lib, text, true),
     };
   },
 };

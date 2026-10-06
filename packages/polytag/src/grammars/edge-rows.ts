@@ -289,7 +289,8 @@ function writeTable(nodes: readonly SnapshotNode[], edges: readonly SnapshotEdge
     ...(hasMeta ? [p.metaKey] : []),
     ...(hasFamily ? [FAMILY_KEY] : []),
   ];
-  const payload = payloadColumns(nodeRows, base);
+  // Every structural column name is reserved, present or not (a payload `label` field must not read back as the label).
+  const payload = payloadColumns(nodeRows, [p.idKey, p.parentKey, p.childKey, p.kindKey, p.labelKey, p.orderKey, p.metaKey, FAMILY_KEY, PAYLOAD_KEY]);
   const columns = [...base, ...payload.columns];
   const blankPayload = payload.columns.map(() => '');
   const nodeLines = nodeRows.map((n) => [

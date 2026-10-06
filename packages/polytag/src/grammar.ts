@@ -50,7 +50,11 @@ export type DiagnosticCode =
   /** The text is larger than `maxBytes`. */
   | 'too-large'
   /** An unexpected failure while reading (a bug: please report it with the input). */
-  | 'internal';
+  | 'internal'
+  /** A format convention was undone on read (a CSV formula escape `'=…` removed). */
+  | 'unescaped'
+  /** A check was skipped (a document too deep to check for duplicate keys). */
+  | 'unchecked';
 
 /** A problem found while reading, located as precisely as the input allows. */
 export interface Diagnostic {
@@ -115,7 +119,7 @@ export interface SerialiseContext {
   readonly rootArray?: boolean;
   /** Values the target format can hold (TOML: no null). Default: everything. */
   readonly limits?: ValueLimits;
-  /** Further named spaces to write next to the primary one (record grammars with a `spaces` param). */
+  /** Further named spaces to write next to the primary one (record grammars with a `spaces` param); `write` receives them planned. */
   readonly spaces?: Readonly<Record<string, SpaceSnapshot>>;
   readonly isMembership?: MembershipTest;
 }
@@ -193,8 +197,8 @@ export function defineGrammar<P extends object>(spec: GrammarSpec<P>): GrammarCo
   const planWith = (space: SpaceSnapshot, p: P, ctx: SerialiseContext): Reduction => {
     const reduced = reduce(space, capsOf(p, ctx.format, space), { isMembership: ctx.isMembership });
     const limited = ctx.limits ? limitValues(reduced.space, ctx.limits) : { space: reduced.space, losses: [] };
-    const own = spec.plan ? spec.plan(limited.space, p, ctx) : { space: limited.space, losses: [] };
-    return { space: own.space, losses: [...reduced.losses, ...limited.losses, ...own.losses] };
+    const own: Reduction = spec.plan ? spec.plan(limited.space, p, ctx) : { space: limited.space, losses: [] };
+    return { space: own.space, losses: [...reduced.losses, ...limited.losses, ...own.losses], ...(own.spaces ? { spaces: own.spaces } : {}) };
   };
   return {
     id: spec.id,
@@ -215,7 +219,7 @@ export function defineGrammar<P extends object>(spec: GrammarSpec<P>): GrammarCo
     serialise(space, params, ctx = {}) {
       const p = resolveParams(params);
       const planned = planWith(space, p, ctx);
-      const { output } = spec.write(planned.space, p, ctx);
+      const { output } = spec.write(planned.space, p, planned.spaces ? { ...ctx, spaces: planned.spaces } : ctx);
       return { output, loss: lossReport(planned.losses) };
     },
   };

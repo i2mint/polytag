@@ -159,8 +159,11 @@ export async function readText(text: string, options: ReadOptions = {}): Promise
   const extra: Diagnostic[] = [];
   let dialect: Record<string, unknown> | undefined;
   try {
+    const codes = { 'duplicate-key': ['warning', 'conflicting-duplicate'], unchecked: ['info', 'unchecked'], unescaped: ['info', 'unescaped'] } as const;
     for (const w of decoded.codec.warnings?.(text) ?? []) {
-      extra.push({ severity: 'warning', code: 'conflicting-duplicate', message: w.message, path: w.pointer, at: { pointer: w.pointer } });
+      const [severity, code] = codes[w.code];
+      const path = 'pointer' in w.at ? w.at.pointer : `row ${w.at.row}${w.at.column !== undefined ? `, column ${w.at.column}` : ''}`;
+      extra.push({ severity, code, message: w.message, path, at: w.at });
     }
     dialect = decoded.codec.dialect?.(text);
   } catch (error) {
@@ -325,6 +328,8 @@ export interface RoundTrip {
   readonly read: ReadResult;
   /** `read.space` compared to `expected` (edge order by rank). */
   readonly diff: SpaceDiff;
+  /** Each planned secondary space compared to the one read back. */
+  readonly spaceDiffs?: Readonly<Record<string, SpaceDiff>>;
   /** The read has no error and matches `expected`. */
   readonly ok: boolean;
 }
@@ -343,9 +348,14 @@ export async function roundTrip(space: SpaceSnapshot, options: WriteOptions): Pr
   const read: ReadResult = parsed
     ? { ...parsed, ok: !parsed.diagnostics.some((d) => d.severity === 'error'), format: format.id, grammar: grammar.id, params: options.params }
     : failed(formatDiagnostic((decoded as { error: FormatError }).error), { format: format.id, grammar: grammar.id });
-  const expected = grammar.plan(space, options.params, contextFor(format, options)).space;
+  const planned = grammar.plan(space, options.params, contextFor(format, options));
+  const expected = planned.space;
   const diff = diffSpaces(expected, read.space);
-  return { text: written.text, loss: written.loss, expected, read, diff, ok: read.ok && diff.equal };
+  const spaceDiffs = planned.spaces
+    ? Object.fromEntries(Object.entries(planned.spaces).map(([name, s]) => [name, diffSpaces(s, read.spaces?.[name] ?? emptySpace())]))
+    : undefined;
+  const ok = read.ok && diff.equal && Object.values(spaceDiffs ?? {}).every((d) => d.equal);
+  return { text: written.text, loss: written.loss, expected, read, diff, ...(spaceDiffs ? { spaceDiffs } : {}), ok };
 }
 
 /**

@@ -35,11 +35,14 @@ export function isTable(value: unknown): value is Table {
   return Array.isArray(columns) && Array.isArray(rows) && rows.every(Array.isArray);
 }
 
-/** A non-fatal problem found while decoding (a duplicate JSON key), located by JSON pointer. */
+/**
+ * A non-fatal finding while decoding: a duplicate JSON key (the last value is kept), a check
+ * skipped because the document is too deep, or a cell whose formula escape was removed.
+ */
 export interface FormatWarning {
-  readonly code: 'duplicate-key';
+  readonly code: 'duplicate-key' | 'unchecked' | 'unescaped';
   readonly message: string;
-  readonly pointer: string;
+  readonly at: Location;
 }
 
 /**
@@ -124,7 +127,9 @@ export type FormatErrorCode =
   /** The value has a shape this format cannot write (a TOML document must be a table). */
   | 'shape'
   /** The value cannot be written at all (a circular structure in JSON, a BigInt). */
-  | 'value';
+  | 'value'
+  /** The text is past a safety limit (a CSV line longer than `maxLineLength`, a document too deep to parse). */
+  | 'limit';
 
 /** A {@link FormatError} as plain, serialisable data. */
 export interface FormatErrorInfo {
