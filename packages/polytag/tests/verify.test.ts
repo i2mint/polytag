@@ -16,6 +16,7 @@ import {
   planImport,
   readText,
   roundTrip,
+  oneHot,
   tagsArray,
   toCollectionSeed,
   writeText,
@@ -169,5 +170,30 @@ describe('low', () => {
     expect(read.diagnostics).toContainEqual(expect.objectContaining({ code: 'unescaped', at: { row: 2, column: 'label' } }));
     const kept = await readText("id,label\nx,'=SUM(A1)\n", { format: 'csv', grammar: 'delimited', formatOptions: { csv: { escapeFormulae: false } } });
     expect(kept.space.nodes[0]).toMatchObject({ label: "'=SUM(A1)" });
+  });
+});
+
+describe('parallel edges (same parent, child and kind), audited in every grammar × format', () => {
+  const space: SpaceSnapshot = {
+    nodes: [{ id: 'r' }, { id: 'g' }, { id: 'x' }],
+    edges: [E('r', 'g'), { ...E('r', 'g'), id: 'contains:r/g#2' }, E('g', 'x'), { ...E('g', 'x'), id: 'contains:g/x#2' }],
+  };
+
+  it('each round-trips, or reports exactly what it drops (and assess agrees)', async () => {
+    const { createGrammarRegistry, compatibility } = await import('../src/index.js');
+    const { createFormatRegistry } = await import('../src/formats/index.js');
+    const grammars = createGrammarRegistry();
+    for (const [grammar, formats] of Object.entries(compatibility(grammars, createFormatRegistry()))) {
+      for (const format of formats) {
+        const rt = await roundTrip(space, { format, grammar });
+        expect(rt.ok, `${grammar} × ${format}`).toBe(true);
+        expect(assess(space, grammars.get(grammar)!, { format }).losses, `${grammar} × ${format}`).toEqual(rt.loss.losses);
+      }
+    }
+  });
+
+  it('one-hot reports the repeated membership it cannot write', () => {
+    const s: SpaceSnapshot = { nodes: [{ id: 'g' }, { id: 'x' }], edges: [E('g', 'x'), { ...E('g', 'x'), id: 'contains:g/x#2' }] };
+    expect(kinds(assess(s, oneHot, { format: 'csv' }).losses)).toEqual([['', 'membership', 'drop', ['contains:g/x#2']]]);
   });
 });

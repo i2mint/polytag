@@ -146,6 +146,7 @@ export const oneHot = defineGrammar<OneHotParams>({
       flatPlan(s, {
         invalidToken: (g) => [p.idKey, p.labelKey, FAMILY_KEY, PAYLOAD_KEY].includes(`${p.columnPrefix}${g}`),
         tokenRule: `would be the same column as the id, label, family or payload column`,
+        repeats: false,
       }),
     ),
 

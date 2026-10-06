@@ -91,13 +91,15 @@ export interface FlatPlanOptions {
   readonly invalidToken?: (id: string) => boolean;
   /** Why such an id cannot be written (for the loss message). */
   readonly tokenRule?: string;
+  /** Can the grammar write the same membership twice (a repeated tag)? One-hot cannot: a cell is one boolean. Default `true`. */
+  readonly repeats?: boolean;
 }
 
 /**
  * Plan an item-major write: take out every edge the tokens or paths cannot carry, and
  * report it. The returned space is what {@link flatRecords} writes and the reader gives back.
  */
-export function flatPlan(space: SpaceSnapshot, { paths, invalidToken = () => false, tokenRule = 'cannot be written as a token' }: FlatPlanOptions = {}): Reduction {
+export function flatPlan(space: SpaceSnapshot, { paths, invalidToken = () => false, tokenRule = 'cannot be written as a token', repeats = true }: FlatPlanOptions = {}): Reduction {
   const losses: Loss[] = [];
   let edges = [...space.edges];
   const groupsOf = (es: readonly SnapshotEdge[]): Set<string> => new Set(es.map((e) => e.parent));
@@ -113,7 +115,20 @@ export function flatPlan(space: SpaceSnapshot, { paths, invalidToken = () => fal
     const outSet = new Set(out);
     edges = edges.filter((e) => !outSet.has(e.id));
   }
-  if (!paths) return { space: { nodes: space.nodes, edges }, losses };
+  if (!paths) {
+    if (repeats) return { space: { nodes: space.nodes, edges }, losses };
+    // A repeated membership (parallel edge) is one cell: written once, read once.
+    const seen = new Set<string>();
+    const repeated = edges.filter((e) => {
+      const key = `${e.parent}\u0000${e.child}`;
+      const again = seen.has(key);
+      seen.add(key);
+      return again;
+    }).map((e) => e.id);
+    const out = new Set(repeated);
+    losses.push(loss('membership', 'drop', repeated, `${repeated.length} repeated membership(s) (parallel edges) are one cell and read back once`));
+    return { space: { nodes: space.nodes, edges: edges.filter((e) => !out.has(e.id)) }, losses };
+  }
 
   // 2. Paths: repeat until nothing more is taken out (taking an edge out can change paths).
   const repeated: string[] = [];
