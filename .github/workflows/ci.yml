@@ -1,3 +1,7 @@
+# npm auth: trusted publishing (OIDC) only. Never add an NPM_TOKEN secret.
+# npmjs.com -> each package -> Settings -> Trusted Publisher -> GitHub Actions:
+#   owner/repo = i2mint/polytag, workflow filename = ci.yml, environment = npm-publish.
+
 name: CI
 
 on:
@@ -86,6 +90,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write # push the release tag with GITHUB_TOKEN
+      id-token: write # npm trusted publishing (OIDC)
 
     steps:
       - uses: actions/checkout@v6
@@ -97,9 +102,16 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           registry-url: https://registry.npmjs.org
+
+      - name: Ensure npm >= 11.5.1 (required for OIDC trusted publishing)
+        run: |
+          if ! node -e "const [a,b,c]=process.argv[1].split('.').map(Number);process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)" "$(npm --version)"; then
+            npm install -g npm@^11.5.1
+          fi
+          npm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -109,7 +121,6 @@ jobs:
 
       - name: Publish packages
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           FORCE_PUBLISH: ${{ needs.gate.outputs.force }}
         # Always `pnpm publish`, never `npm publish`: only pnpm rewrites `workspace:*`
         # ranges to real versions. No `|| true`: an expired NPM_TOKEN makes the registry
@@ -123,7 +134,7 @@ jobs:
           if [ "$FORCE_PUBLISH" = "true" ]; then
             FORCE="--no-git-checks"
           fi
-          pnpm -r publish --access public $FORCE
+          pnpm -r publish --access public --provenance $FORCE
 
       # A publish is only real if the registry serves it. Ask the registry, don't infer it
       # from an exit code. A brand-new package name can 404 for minutes after a successful
