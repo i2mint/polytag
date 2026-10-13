@@ -37,6 +37,10 @@ Imports are planned first: `planImport(existing, incoming)` lists create / updat
 
 **The round-trip gate.** `packages/polytag/tests/roundtrip.test.ts` writes and reads back the reference dataset of the research, its polyhierarchy variant and a space using every feature, in every grammar × compatible format, and fails the build unless the result is exactly what the loss report predicted (edge order by rank, deterministic edge ids). `tests/fuzz.test.ts` does the same for seeded random spaces with tricky ids, labels, payloads and kinds, and also checks that the report made before writing equals the write's.
 
+## Agent skill
+
+`skills/polytag/` is a usage skill for coding agents: asked to "add CRUD over this data with this UI", "organise my files with tags" or "an item in several folders at once", an agent walks the decision flow (where the data lives, grammar, profile, backend, view). Install it with `gh skill install i2mint/polytag polytag`. Its format, grammar and profile tables are generated from the registries by `scripts/gen-skill-tables.mjs`, and the scripts' tests fail when they drift.
+
 ## Docs
 
 | | |
