@@ -11,7 +11,7 @@
  *   node scripts/gen-skill-tables.mjs --check   exit 1 if any table is out of date (CI)
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -29,8 +29,8 @@ async function loadGroupsCore() {
 }
 
 /**
- * What each profile is for: the one hand-written column. A profile missing here fails the
- * generator, so a new profile cannot ship without a line in the skill.
+ * What each profile is for: the one hand-written column (`null`: deprecated, left out). A profile
+ * missing here fails the generator, so a new profile cannot ship without a line in the skill.
  */
 const PROFILE_USES = {
   filesystem: 'folders: an item, and a folder, in exactly one place',
@@ -38,7 +38,7 @@ const PROFILE_USES = {
   nestedTags: 'nested tags (`a/b`): many per item, the tag tree is a tree',
   labels: 'Gmail labels: many per item, the label tree is a tree',
   polyhierarchy: 'the general case: items and groups in several groups',
-  taxonomy: 'deprecated',
+  taxonomy: null, // deprecated in groups-core: it cannot hold a space with an edge
   thesaurus: 'typed edges (`is_a`, `part_of`, `related`) with closure per kind',
   folksonomy: 'flat tags whose memberships are per user',
 };
@@ -63,22 +63,46 @@ export async function renderTables() {
     return [`\`${f.id}\``, f.label, list(f.extensions), f.kind, d ? `\`${d.import}\`` : '—', d ? `\`${d.export}\`` : '—'];
   });
 
-  // A grammar keeps a feature when its capability is `yes` (or an order it keeps).
+  // A grammar keeps a feature when its capability is `yes` / `native` (or an order it keeps). A
+  // capability can depend on the format (YAML anchors are native, JSON copies a convention), so
+  // each cell is computed per compatible format and split when the formats disagree.
   const keeps = (v) => (v === 'yes' || v === 'native' || v === 'group-major' ? 'yes' : v === 'no' || v === 'single' ? 'no' : v);
+  const COLUMNS = ['itemsMultiParent', 'nestedGroups', 'groupsMultiParent', 'groupMeta', 'edgeKinds'];
   const grammarRows = grammarRegistry.list().map((g) => {
-    const c = g.capabilities;
-    return [`\`${g.id}\``, g.description, list(matrix[g.id] ?? []), keeps(c.itemsMultiParent), keeps(c.nestedGroups), keeps(c.groupsMultiParent), keeps(c.groupMeta), keeps(c.edgeKinds)];
+    const fmts = matrix[g.id] ?? [];
+    const cells = COLUMNS.map((key) => {
+      const byValue = new Map();
+      for (const f of fmts) {
+        const v = keeps(g.capabilitiesFor(undefined, f)[key]);
+        byValue.set(v, [...(byValue.get(v) ?? []), f]);
+      }
+      if (byValue.size <= 1) return [...byValue.keys()][0] ?? keeps(g.capabilities[key]);
+      return [...byValue].map(([v, fs]) => `${v} (${fs.join(', ')})`).join('; ');
+    });
+    return [`\`${g.id}\``, g.description, list(fmts), ...cells];
   });
 
   const n = (v) => (v === null || v === Infinity || v === undefined ? 'any' : v);
   const yn = (v) => (v ? 'yes' : 'no');
+  // Deprecated profiles are left out: groups-core's own list when it has one (0.1.0 does not), and
+  // a `null` use below otherwise.
   const deprecated = groups.DEPRECATED_PROFILES ?? {};
   const profileRows = Object.values(groups.PROFILES)
     .filter((p) => !(p.name in deprecated))
-    .map((p) => {
+    .filter((p) => {
       if (!(p.name in PROFILE_USES)) throw new Error(`profile '${p.name}' has no entry in PROFILE_USES: say what it is for`);
-      return [`\`${p.name}\``, PROFILE_USES[p.name], n(p.maxParentsPerItem), n(p.maxParentsPerGroup), n(p.maxDepth), yn(p.groupsMayContainGroups), yn(p.ordered)];
-    });
+      return PROFILE_USES[p.name] !== null;
+    })
+    .map((p) => [
+      `\`${p.name}\``,
+      PROFILE_USES[p.name],
+      n(p.maxParentsPerItem),
+      n(p.maxParentsPerGroup),
+      n(p.maxDepth),
+      yn(p.groupsMayContainGroups),
+      yn(p.groupsMayContainItems),
+      yn(p.ordered),
+    ]);
 
   return {
     formats: table(['format', 'name', 'extensions', 'reads as', 'import default', 'export default'], formatRows),
@@ -86,7 +110,7 @@ export async function renderTables() {
       ['grammar', 'what it is', 'formats', 'item in several groups', 'nested groups', 'group in several groups', 'group metadata', 'typed edges'],
       grammarRows,
     ),
-    profiles: table(['profile', 'for', 'parents per item', 'parents per group', 'group depth', 'groups in groups', 'ordered'], profileRows),
+    profiles: table(['profile', 'for', 'parents per item', 'parents per group', 'group depth', 'groups in groups', 'items in groups', 'ordered'], profileRows),
   };
 }
 
@@ -103,7 +127,8 @@ export function fill(text, tables) {
   return out;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// Compare real paths: run through a symlink, `argv[1]` is the link and the check would silently skip.
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {
   const check = process.argv.includes('--check');
   const text = readFileSync(SKILL_PATH, 'utf8');
   const next = fill(text, await renderTables());

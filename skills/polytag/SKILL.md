@@ -9,7 +9,7 @@ metadata:
 
 polytag is headless CRUD for collections whose items belong to groups: folders that overlap, tags that nest, labels, facets. It sits on [zodal-groups](https://github.com/i2mint/zodal-groups) (the membership model) and [zodal](https://github.com/i2mint/zodal) (records, stores, UI). Install: `npm install polytag @zodal/groups-core @zodal/core zod`.
 
-**Availability (check before promising an API):** `polytag`, `@zodal/groups-collection` and `@zodal/groups-store-fs` are not on npm yet, and the npm `@zodal/groups-*` 0.1.0 releases predate `inferProfile`, `createMemoryGroupStore` and the tag input's `onWrite`. Until they publish, depend on the repos' workspace packages. Run `npm view <package> versions` when it matters.
+**Availability (check before promising an API):** `polytag`, `@zodal/groups-collection` and `@zodal/groups-store-fs` are not on npm yet, and the npm `@zodal/groups-*` 0.1.0 releases predate `inferProfile`, `createMemoryGroupStore`, `renderTagMenu` and the tag input's `onWrite`. Until they publish, depend on the repos' workspace packages. Run `npm view <package> versions` when it matters.
 
 **The one idea to keep:** membership is the data, a flat set of `(group, item)` edges. A folder tree, a tag cloud, a facet panel and a breadcrumb are views computed from those edges. So "folders or tags?" is not a data-model choice; it is a **profile** (how many parents an item may have) plus a **view**.
 
@@ -47,12 +47,12 @@ A **format** is the syntax (YAML); a **grammar** is how items, groups and member
 | `tsv` | TSV | `.tsv`, `.tab` | table | `delimited` | `edge-rows` |
 <!-- END generated:formats -->
 
-What each grammar keeps (`convention`: kept by an encoding convention, such as YAML anchors or a path separator, and reported as such):
+What each grammar keeps, per format where the formats differ (`convention`: kept only by an encoding convention, such as a JSON item copied under each of its folders, and reported in the loss report; `yes`: native, such as YAML anchors):
 
 <!-- BEGIN generated:grammars -->
 | grammar | what it is | formats | item in several groups | nested groups | group in several groups | group metadata | typed edges |
 |---|---|---|---|---|---|---|---|
-| `nested` | Folders as nested objects with children arrays; array position is the order. Several parents: copies (JSON), anchors (YAML) or refs. | `json`, `jsonc`, `yaml`, `toml` | convention | yes | convention | yes | no |
+| `nested` | Folders as nested objects with children arrays; array position is the order. Several parents: copies (JSON), anchors (YAML) or refs. | `json`, `jsonc`, `yaml`, `toml` | convention (json, jsonc, toml); yes (yaml) | yes | convention (json, jsonc, toml); yes (yaml) | yes | no |
 | `tags-array` | Each item lists its groups. Flat: group → group edges, group metadata and group order are not written. | `json`, `jsonc`, `yaml`, `toml` | yes | no | no | no | no |
 | `tag-paths` | Each item lists the paths of its groups (food/italian); prefixes give the nesting. Group metadata and group order are not written. | `json`, `jsonc`, `yaml`, `toml` | yes | yes | convention | no | no |
 | `members-map` | Each group lists its members; a member that is also a key is a nested group. Node labels and payloads are not written. | `json`, `jsonc`, `yaml`, `toml` | yes | yes | yes | no | no |
@@ -62,23 +62,22 @@ What each grammar keeps (`convention`: kept by an encoding convention, such as Y
 | `node-link` | Nodes and edges as a graph: JSON Graph Format v2 (also reads d3 / NetworkX node-link and Cytoscape). Lossless. | `json`, `jsonc`, `yaml`, `toml` | yes | yes | yes | yes | yes |
 <!-- END generated:grammars -->
 
-**Before writing, show the loss.** `exportChoices(space, { format })` lists every grammar for that format with its loss report, best first; `writeText` returns the same report as `out.loss`. Never export silently to a lossy grammar: `node-link` (JSON) and `edge-rows` (CSV) are lossless.
+**Before writing, show the loss.** `exportChoices(space, { format })` lists every grammar for that format with its loss report, best first; `writeText` returns the same report as `out.loss`. Never export silently to a lossy grammar: the grammars whose description above says *Lossless* keep everything, and are the export defaults.
 
 ### 3. Which profile?
 
-The profile is the rule set over the one model. Pick the most restrictive that fits the user's words ("folders" → `filesystem`, "tags" → `flatTags`, "labels like Gmail" → `labels`, "an item in several folders" → `polyhierarchy`). Not sure? `inferProfile(space)` from `@zodal/groups-core` names the tightest profile the data already satisfies.
+The profile is the rule set over the one model. Pick the most restrictive that fits the user's words ("folders" → `filesystem`, "tags" → `flatTags`, "labels like Gmail" → `labels`, "an item in several folders" → `polyhierarchy`). Not sure? `inferProfile(createGroupSpace({ profile: 'polyhierarchy', ...read.space }))` from `@zodal/groups-core` returns the tightest dials the data already satisfies (`{ profile, violations, evidence }`); it takes a `GroupSpace`, not the raw read.
 
 <!-- BEGIN generated:profiles -->
-| profile | for | parents per item | parents per group | group depth | groups in groups | ordered |
-|---|---|---|---|---|---|---|
-| `filesystem` | folders: an item, and a folder, in exactly one place | 1 | 1 | any | yes | yes |
-| `flatTags` | flat tags: many per item, no tags on tags | any | any | 0 | no | no |
-| `nestedTags` | nested tags (`a/b`): many per item, the tag tree is a tree | any | 1 | any | yes | no |
-| `labels` | Gmail labels: many per item, the label tree is a tree | any | 1 | any | yes | no |
-| `polyhierarchy` | the general case: items and groups in several groups | any | any | any | yes | no |
-| `taxonomy` | deprecated | any | any | any | yes | no |
-| `thesaurus` | typed edges (`is_a`, `part_of`, `related`) with closure per kind | any | any | any | yes | no |
-| `folksonomy` | flat tags whose memberships are per user | any | any | 0 | no | no |
+| profile | for | parents per item | parents per group | group depth | groups in groups | items in groups | ordered |
+|---|---|---|---|---|---|---|---|
+| `filesystem` | folders: an item, and a folder, in exactly one place | 1 | 1 | any | yes | yes | yes |
+| `flatTags` | flat tags: many per item, no tags on tags | any | any | 0 | no | yes | no |
+| `nestedTags` | nested tags (`a/b`): many per item, the tag tree is a tree | any | 1 | any | yes | yes | no |
+| `labels` | Gmail labels: many per item, the label tree is a tree | any | 1 | any | yes | yes | no |
+| `polyhierarchy` | the general case: items and groups in several groups | any | any | any | yes | yes | no |
+| `thesaurus` | typed edges (`is_a`, `part_of`, `related`) with closure per kind | any | any | any | yes | yes | no |
+| `folksonomy` | flat tags whose memberships are per user | any | any | 0 | no | yes | no |
 <!-- END generated:profiles -->
 
 ### 4. Which backend?
@@ -87,7 +86,7 @@ polytag's own backend menu is not built yet ([i2mint/polytag#2](https://github.c
 
 - **Item records**: any zodal `DataProvider`: `createInMemoryProvider` (`@zodal/store`), `@zodal/store-localstorage`, `@zodal/store-fs`, `@zodal/store-http`, `@zodal/store-s3`, `@zodal/store-supabase`.
 - **Memberships**: embedded (a `string[]` of group ids on each record; flat tags and labels over any provider) or a `GroupStore` (`createMemoryGroupStore` in `@zodal/groups-core`, `@zodal/groups-store-fs` for a JSON sidecar file) when groups nest, edges carry kinds, labels or order, or groups need their own names.
-- **One object over both**: `defineTaggedCollection({ provider, spaces })` from `@zodal/groups-collection` gives create / tag / untag / bulkTag / rename / merge / delete, each returning the inverse that undoes it. `toCollectionSeed(read)` turns a polytag read into its records and named spaces.
+- **One object over both**: `defineTaggedCollection({ provider, spaces })` from `@zodal/groups-collection` gives `create`, `tag` / `untag` / `bulkTag`, `renameGroup`, `mergeGroups`, `deleteItem` / `deleteGroup` and `removeFromGroup`, each returning the inverse that undoes it. `toCollectionSeed(read)` turns a polytag read into its records and named spaces.
 
 ### 5. Which view?
 
@@ -106,7 +105,7 @@ React and shadcn renderers for the group views are not shipped yet; use the vani
 
 ## Rules that save a rewrite
 
-- **Drag means add, not move**, unless the profile is `filesystem`. Moving silently drops the item's other memberships.
+- **Drag means add; a modifier (Alt) means move.** A silent move would drop the item's other memberships. (Under single-parent profiles such as `filesystem`, `resolveDrop` currently refuses the drag of an item that already has a parent, even as a move: i2mint/zodal-groups#18.)
 - **Remove from a group is not delete.** The item and its other memberships stay.
 - **Counts are de-duplicated over the closure**, never a sum of child counts (an item under two subgroups counts once).
 - **Expansion is keyed by path, selection by node id.** The same group can appear twice in a tree.
