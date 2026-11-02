@@ -4,7 +4,18 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { decideRelease, hasMarker, isPublished, publicPackages, publicSpecs, releaseWindowSubjects } from './release-gate.mjs';
+import {
+  decideRelease,
+  hasMarker,
+  isPublished,
+  packageManifests,
+  publicPackages,
+  publicSpecs,
+  releaseTag,
+  releaseWindowSubjects,
+  verifyPublished,
+  workspaceDirs,
+} from './release-gate.mjs';
 
 const unpublished = [{ name: 'polytag', version: '0.1.0', published: false }];
 const published = [{ name: 'polytag', version: '0.1.0', published: true }];
@@ -87,6 +98,9 @@ describe('releaseWindowSubjects', () => {
   const decide = async (version, options) =>
     decideRelease({ subjects: await window(options), packages: [{ name: 'p', version, published: false }] });
   git('init', '-q', '-b', 'main');
+  writeFileSync(join(repo, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
+  writeFileSync(join(repo, 'package.json'), '{ "name": "root", "private": true }\n');
+  git('add', '-A');
   commit('first');
 
   it('reads the whole first-parent history while nothing bounds it', async () => {
@@ -191,6 +205,12 @@ describe('isPublished', () => {
     await expect(isPublished('polytag', '0.0.0', { fetchImpl: fakeFetch(503) })).rejects.toThrow(/503/);
   });
 
+  it('times out a hung request instead of waiting on it', async () => {
+    const hung = (url, { signal }) =>
+      new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason)));
+    await expect(isPublished('polytag', '0.0.0', { fetchImpl: hung, timeoutMs: 5 })).rejects.toThrow(/timeout|aborted/i);
+  });
+
   it('encodes scoped names as the registry expects', async () => {
     let seen = '';
     await isPublished('@zodal/core', '0.2.0', {
@@ -215,6 +235,7 @@ describe('publicSpecs and --list', () => {
     mkdirSync(join(root, 'packages', dir), { recursive: true });
     writeFileSync(join(root, 'packages', dir, 'package.json'), JSON.stringify(fields));
   };
+  writeFileSync(join(root, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
   pkg('a', { name: '@scope/a', version: '1.2.0-beta.1' });
   pkg('b', { name: 'b', version: '0.1.0', private: true });
   mkdirSync(join(root, 'packages', 'not-a-package'));
@@ -223,14 +244,109 @@ describe('publicSpecs and --list', () => {
     expect(publicSpecs(root)).toEqual(['@scope/a@1.2.0-beta.1']);
   });
 
-  it('--list prints this repo\'s public packages, one per line, with no git and no network', () => {
+  it('--list prints this repo\'s public packages, one per line, with no network', () => {
     const script = fileURLToPath(new URL('./release-gate.mjs', import.meta.url));
     const { version } = JSON.parse(readFileSync(new URL('../packages/polytag/package.json', import.meta.url), 'utf8'));
     const noFetch = 'data:text/javascript,globalThis.fetch=()=>{throw new Error("network")}';
-    const out = execFileSync(process.execPath, ['--import', noFetch, script, '--list'], {
-      encoding: 'utf8',
-      env: { PATH: '/nonexistent' }, // no git on PATH
-    });
+    const out = execFileSync(process.execPath, ['--import', noFetch, script, '--list'], { encoding: 'utf8' });
     expect(out).toBe(`polytag@${version}\n`);
+  });
+});
+
+describe('the workspace: what pnpm -r publish publishes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'polytag-ws-'));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  const pkg = (dir, fields) => {
+    mkdirSync(join(root, dir), { recursive: true });
+    writeFileSync(join(root, dir, 'package.json'), JSON.stringify(fields));
+  };
+  pkg('.', { name: 'root', private: true });
+  pkg('packages/a', { name: 'a', version: '1.0.0' });
+  pkg('apps/public-app', { name: 'public-app', version: '1.0.0' });
+  pkg('apps/private-app', { name: 'private-app', version: '0.0.0', private: true });
+  writeFileSync(join(root, 'pnpm-workspace.yaml'), "packages: ['packages/*', apps/*]\n"); // flow style: pnpm's reading, not ours
+
+  it('lists what pnpm lists (any YAML style), root excluded, a public package outside packages/ included (review of #23)', () => {
+    expect(workspaceDirs(root).sort()).toEqual([join('apps', 'private-app'), join('apps', 'public-app'), join('packages', 'a')]);
+    expect(publicSpecs(root).sort()).toEqual(['a@1.0.0', 'public-app@1.0.0']);
+  });
+
+  it('takes the listing as a seam (absolute dirs, root included)', () => {
+    const listWorkspace = () => [root, join(root, 'packages', 'a')];
+    expect(publicSpecs(root, { listWorkspace })).toEqual(['a@1.0.0']);
+  });
+
+  it('fails closed, with pnpm\'s reason, when pnpm cannot list the workspace', () => {
+    // Outside any workspace: pnpm walks up to the nearest one.
+    const empty = mkdtempSync(join(tmpdir(), 'polytag-empty-'));
+    expect(() => workspaceDirs(empty)).toThrow(/cannot list the pnpm workspace: pnpm lists nothing/);
+    const broken = mkdtempSync(join(tmpdir(), 'polytag-broken-'));
+    writeFileSync(join(broken, 'package.json'), '{ not json');
+    expect(() => workspaceDirs(broken)).toThrow(/cannot list the pnpm workspace: .+/);
+    expect(() => workspaceDirs(broken)).not.toThrow(/Command failed/);
+    rmSync(empty, { recursive: true, force: true });
+    rmSync(broken, { recursive: true, force: true });
+  });
+
+  it("this repo's manifests include the private playground (a private-flag change moves the window)", () => {
+    expect(packageManifests()).toContain(join('apps', 'playground', 'package.json'));
+  });
+});
+
+describe('releaseTag', () => {
+  it('is v<version> when the public packages agree', () => {
+    expect(releaseTag([{ name: 'a', version: '1.2.0' }, { name: 'b', version: '1.2.0' }])).toBe('v1.2.0');
+  });
+
+  it('throws when they disagree, or there is none', () => {
+    expect(() => releaseTag([{ name: 'a', version: '1.2.0' }, { name: 'b', version: '1.3.0' }])).toThrow(/1\.2\.0, 1\.3\.0/);
+    expect(() => releaseTag([])).toThrow(/no public package/);
+  });
+
+  it('--tag prints this repo\'s tag', () => {
+    const script = fileURLToPath(new URL('./release-gate.mjs', import.meta.url));
+    const { version } = JSON.parse(readFileSync(new URL('../packages/polytag/package.json', import.meta.url), 'utf8'));
+    expect(execFileSync(process.execPath, [script, '--tag'], { encoding: 'utf8' })).toBe(`v${version}\n`);
+  });
+});
+
+describe('verifyPublished', () => {
+  const pkgs = [{ name: 'a', version: '1.0.0' }];
+  const scripted = (...answers) => {
+    const calls = [];
+    return {
+      calls,
+      impl: async (name, version) => {
+        calls.push(`${name}@${version}`);
+        const a = answers.shift();
+        if (a instanceof Error) throw a;
+        return a;
+      },
+    };
+  };
+  const options = (impl, extra = {}) => {
+    const log = [];
+    const slept = [];
+    return { log, slept, opts: { attempts: 3, intervalMs: 7, sleep: async (ms) => void slept.push(ms), isPublishedImpl: impl, log: (l) => log.push(l), ...extra } };
+  };
+
+  it('returns once every version is served, waiting between attempts while it lags', async () => {
+    const { impl, calls } = scripted(false, true);
+    const { log, slept, opts } = options(impl);
+    await verifyPublished(pkgs, opts);
+    expect(calls).toEqual(['a@1.0.0', 'a@1.0.0']);
+    expect(slept).toEqual([7]);
+    expect(log.at(-1)).toBe('a@1.0.0 confirmed on the registry (attempt 2)');
+  });
+
+  it('retries a registry error and names it when the version never appears', async () => {
+    const { impl } = scripted(new Error('Registry answered 503'), false, new Error('Registry answered 503'));
+    const { slept, opts } = options(impl);
+    await expect(verifyPublished(pkgs, opts)).rejects.toThrow(/a@1\.0\.0 never appeared on the registry \(registry error: Registry answered 503\)/);
+    expect(slept).toEqual([7, 7]); // no sleep after the last attempt
+  });
+
+  it('fails closed on an empty list', async () => {
+    await expect(verifyPublished([], options(async () => true).opts)).rejects.toThrow(/no public package/);
   });
 });

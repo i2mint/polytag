@@ -25,13 +25,18 @@
  * the publish job's concurrency group keeps one pending run and cancels the older one, so
  * the intermediate version is never released (bump again, or publish it by hand, to keep it).
  *
- * Usage (CI):  node scripts/release-gate.mjs          -> writes publish=, force= to $GITHUB_OUTPUT
- *              node scripts/release-gate.mjs --list   -> prints name@version of each public package, one per line
- * API:         decideRelease, hasMarker, releaseWindowSubjects, isPublished, publicPackages, publicSpecs
+ * Usage (CI):  node scripts/release-gate.mjs           -> writes publish=, force= to $GITHUB_OUTPUT
+ *              node scripts/release-gate.mjs --list    -> name@version of each public package, one per line
+ *              node scripts/release-gate.mjs --tag     -> the release tag v<version> (versions must agree)
+ *              node scripts/release-gate.mjs --verify  -> waits until the registry serves every public version
+ * "Public package" means a non-private package of the pnpm workspace, as `pnpm ls -r` lists it:
+ * exactly what `pnpm -r publish` publishes.
+ * API:         decideRelease, hasMarker, releaseWindowSubjects, isPublished, publicPackages, publicSpecs,
+ *              releaseTag, verifyPublished, workspaceDirs, pnpmWorkspaceDirs
  */
 
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -93,7 +98,7 @@ export function decideRelease({ subjects, packages, headSubject = '' }) {
  *
  * @param {string} [cwd]
  * @param {object} [options]
- * @param {string[]} [options.manifests]  Manifest paths relative to `cwd`; default: every package's under `packages/`.
+ * @param {string[]} [options.manifests]  Manifest paths relative to `cwd`; default: every workspace package's.
  * @param {(tag: string) => Promise<boolean>} [options.isReleased]  Is this `v*` tag's version on the registry?
  *   Default: yes (the publish job pushes a tag only after the registry serves its version).
  */
@@ -133,55 +138,152 @@ export async function releaseWindowSubjects(
   return subjects;
 }
 
-/** Manifest paths (relative to `root`) of every package under `packages/`, private ones included. */
-export function packageManifests(root = ROOT) {
-  const dir = join(root, 'packages');
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .map((d) => join(dir, d, 'package.json'))
-    .filter(existsSync)
-    .map((p) => relative(root, p));
+/**
+ * The workspace's package directories, relative to `root` (the root itself excluded: pnpm
+ * does not publish it without `include-workspace-root`), exactly as pnpm sees them, so
+ * there is no second reading of `pnpm-workspace.yaml` to drift from `pnpm -r publish`.
+ *
+ * @param {string} [root]
+ * @param {{listWorkspace?: (root: string) => string[]}} [options]  Absolute package dirs, root included.
+ *   Default: `pnpm ls -r --depth -1 --json` (no install needed).
+ */
+export function workspaceDirs(root = ROOT, { listWorkspace = pnpmWorkspaceDirs } = {}) {
+  const dirs = listWorkspace(root);
+  const rootReal = realpathSync(root);
+  return dirs
+    .map((dir) => realpathSync(dir))
+    .filter((dir) => dir !== rootReal)
+    .map((dir) => relative(rootReal, dir));
 }
 
-/** Non-private packages under `packages/`, with their manifest path relative to `root`. */
-export function publicPackages(root = ROOT) {
-  return packageManifests(root)
+/** Absolute directories of every workspace package, root included, from pnpm itself. */
+export function pnpmWorkspaceDirs(root = ROOT) {
+  let out;
+  try {
+    out = execFileSync('pnpm', ['ls', '-r', '--depth', '-1', '--json'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (err) {
+    const why = String(err.stdout || err.stderr || '').trim().split('\n')[0] || err.message.split('\n')[0];
+    const hint = err.code === 'ENOENT' && existsSync(root) ? ' (is pnpm on PATH?)' : '';
+    throw new Error(`cannot list the pnpm workspace${hint}: ${why}`);
+  }
+  if (!out.trim()) throw new Error(`cannot list the pnpm workspace: pnpm lists nothing at ${root} (no package.json / pnpm-workspace.yaml?)`);
+  return JSON.parse(out).map((p) => p.path);
+}
+
+/** Manifest paths (relative to `root`) of every workspace package, private ones included. */
+export function packageManifests(root = ROOT, options = {}) {
+  return workspaceDirs(root, options)
+    .map((d) => join(d, 'package.json'))
+    .filter((m) => existsSync(join(root, m)));
+}
+
+/** Non-private workspace packages, with their manifest path relative to `root`. */
+export function publicPackages(root = ROOT, options = {}) {
+  return packageManifests(root, options)
     .map((manifest) => ({ manifest, ...JSON.parse(readFileSync(join(root, manifest), 'utf8')) }))
     .filter((p) => !p.private)
     .map(({ name, version, manifest }) => ({ name, version, manifest }));
 }
 
 /** `name@version` of each public package: what a publish releases, and what the registry must then serve. */
-export function publicSpecs(root = ROOT) {
-  return publicPackages(root).map(({ name, version }) => `${name}@${version}`);
+export function publicSpecs(root = ROOT, options = {}) {
+  return publicPackages(root, options).map(({ name, version }) => `${name}@${version}`);
+}
+
+/** The release tag, `v<version>`: the public packages must agree on one version. */
+export function releaseTag(packages) {
+  const versions = [...new Set(packages.map((p) => p.version))];
+  if (versions.length !== 1) {
+    throw new Error(`cannot derive one release tag: public package versions are ${versions.join(', ') || '(no public package)'}`);
+  }
+  return `v${versions[0]}`;
+}
+
+/**
+ * Wait until the registry serves every package's version; throw if one never appears. A 404
+ * means "not visible yet" (a new name can lag for minutes); a registry error is retried too,
+ * and named in the failure, so an outage never reads as a failed publish without saying so.
+ *
+ * @param {{name: string, version: string}[]} packages
+ * @param {object} [options]
+ * @param {number} [options.attempts]
+ * @param {number} [options.intervalMs]
+ * @param {(ms: number) => Promise<void>} [options.sleep]
+ * @param {typeof isPublished} [options.isPublishedImpl]
+ * @param {(line: string) => void} [options.log]
+ */
+export async function verifyPublished(
+  packages,
+  {
+    attempts = 20,
+    intervalMs = 15_000,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    isPublishedImpl = isPublished,
+    log = console.log,
+  } = {},
+) {
+  if (packages.length === 0) throw new Error('no public package to verify');
+  for (const { name, version } of packages) {
+    const spec = `${name}@${version}`;
+    let last = 'not visible yet';
+    let confirmed = false;
+    for (let attempt = 1; attempt <= attempts && !confirmed; attempt++) {
+      try {
+        confirmed = await isPublishedImpl(name, version);
+        last = 'not visible yet';
+      } catch (err) {
+        last = `registry error: ${err.message}`;
+      }
+      log(confirmed ? `${spec} confirmed on the registry (attempt ${attempt})` : `${spec} ${last} (attempt ${attempt}/${attempts})`);
+      if (!confirmed && attempt < attempts) await sleep(intervalMs);
+    }
+    if (!confirmed) throw new Error(`${spec} never appeared on the registry (${last}): the publish failed`);
+  }
 }
 
 /**
  * Is `name@version` on the registry? 404 means no; any other non-2xx throws, so a
  * registry outage never reads as "unpublished".
  */
-export async function isPublished(name, version, { registry = DEFAULT_REGISTRY, fetchImpl = fetch } = {}) {
+export async function isPublished(
+  name,
+  version,
+  { registry = DEFAULT_REGISTRY, fetchImpl = fetch, timeoutMs = 30_000 } = {},
+) {
   const encoded = name.startsWith('@') ? `@${encodeURIComponent(name.slice(1))}` : encodeURIComponent(name);
-  const res = await fetchImpl(`${registry}/${encoded}/${encodeURIComponent(version)}`);
+  // A hung connection is an error (retried by verifyPublished), not a five-minute wait.
+  const res = await fetchImpl(`${registry}/${encoded}/${encodeURIComponent(version)}`, { signal: AbortSignal.timeout(timeoutMs) });
   if (res.status === 404) return false;
   if (res.ok) return true;
   throw new Error(`Registry answered ${res.status} for ${name}@${version}`);
 }
 
 async function main() {
-  const publics = publicPackages();
+  const manifests = packageManifests(); // one pnpm call for both uses below
+  const publics = publicPackages(ROOT, { listWorkspace: () => [ROOT, ...manifests.map((m) => join(ROOT, dirname(m)))] });
   const isReleased = async (tag) =>
     (await Promise.all(publics.map((p) => isPublished(p.name, tag.slice(1))))).some(Boolean);
-  const subjects = await releaseWindowSubjects(ROOT, { isReleased });
+  const subjects = await releaseWindowSubjects(ROOT, { manifests, isReleased });
   const packages = await Promise.all(publics.map(async (p) => ({ ...p, published: await isPublished(p.name, p.version) })));
   const headSubject = execFileSync('git', ['log', '-1', '--format=%s'], { cwd: ROOT, encoding: 'utf8' }).trim();
   const { publish, force, notice, reason } = decideRelease({ subjects, packages, headSubject });
+  // The publish job tags v<version>: refuse here, before anything is published, if there is no one version.
+  if (publish) releaseTag(publics);
   console.log(`subjects in the release window: ${subjects.length}`);
   console.log(notice ? `::notice title=Release gate::${reason}` : reason);
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `publish=${publish}\nforce=${force}\n`);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  if (process.argv.includes('--list')) console.log(publicSpecs().join('\n'));
-  else await main();
+  const [mode] = process.argv.slice(2);
+  try {
+    if (mode === '--list') console.log(publicSpecs().join('\n'));
+    else if (mode === '--tag') console.log(releaseTag(publicPackages()));
+    else if (mode === '--verify') await verifyPublished(publicPackages());
+    else if (mode === undefined) await main();
+    else throw new Error(`unknown option ${mode} (expected --list, --tag or --verify)`);
+  } catch (err) {
+    console.error(`::error title=Release gate::${err.message}`); // stderr: `TAG=$(... --tag)` must not swallow it
+    process.exit(1);
+  }
 }
