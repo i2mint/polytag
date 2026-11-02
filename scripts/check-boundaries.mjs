@@ -253,6 +253,35 @@ function scanOwnFile(file) {
 }
 
 /**
+ * The import graph of `entry` (an esbuild metafile; nothing written). Every import a runtime
+ * would execute is followed, even ones a bundler may drop because the package says
+ * `sideEffects: false` (a code-split entry bare-imports the chunks it needs for evaluation
+ * order): fail closed, and no "ignoring this import" warning. `external` keeps bare imports
+ * unbundled, to be judged by name.
+ */
+function bundleGraph(entry, { absWorkingDir, nodePaths, external = false }) {
+  return build({
+    entryPoints: [entry],
+    absWorkingDir,
+    nodePaths,
+    bundle: true,
+    write: false,
+    metafile: true,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+    ignoreAnnotations: true,
+    ...(external ? { packages: 'external' } : {}),
+  });
+}
+
+/** Is `file` (a real path) one of the package's own files, outside `node_modules` and, unless allowed, `tests/`? */
+const isOwnFile = (packageDir, { tests = false } = {}) => (file) => {
+  const r = toPosix(relative(packageDir, file));
+  return !r.startsWith('..') && !r.includes('node_modules/') && (tests || !r.startsWith('tests/'));
+};
+
+/**
  * Code pass: bundle each entry (source or built JS) and return what it reaches.
  *
  * @param {object} options
@@ -277,21 +306,7 @@ export async function checkSources({
   for (const entry of entries) {
     const entryAbs = resolve(absWorkingDir, entry);
     const owner = nearestPackageJson(entryAbs);
-    const { metafile, warnings } = await build({
-      entryPoints: [entryAbs],
-      absWorkingDir,
-      nodePaths,
-      bundle: true,
-      write: false,
-      metafile: true,
-      platform: 'node',
-      format: 'esm',
-      logLevel: 'silent',
-      // Follow every import a runtime would execute, even ones a bundler may drop because the
-      // package says `sideEffects: false` (a code-split entry bare-imports the chunks it needs
-      // for evaluation order): fail closed, and no "ignoring this import" warning.
-      ignoreAnnotations: true,
-    });
+    const { metafile, warnings } = await bundleGraph(entryAbs, { absWorkingDir, nodePaths });
     const violations = warnings.map((w) => ({
       kind: 'esbuild warning',
       path: w.text,
@@ -460,7 +475,10 @@ function conditionsWithoutTypes(target, path = []) {
  * @param {object} [options]  `absWorkingDir`, `nodePaths`, `compilerOptions`, `forbidden` (see the passes).
  * @returns {Promise<{errors: string[], results: {entry: string, violations: object[]}[]}>}
  */
-export async function checkPackage(packageDir, { absWorkingDir = ROOT, nodePaths = [], compilerOptions, forbidden } = {}) {
+export async function checkPackage(dir, { absWorkingDir = ROOT, nodePaths = [], compilerOptions, forbidden } = {}) {
+  // Bundled inputs come back as real paths: a symlinked `dir` (macOS /tmp) would make every
+  // one of them look foreign, and the checks that compare against the package pass vacuously.
+  const packageDir = realpathOr(dir);
   const errors = [];
   const pkg = readJson(join(packageDir, 'package.json'));
   const subpathsFile = join(packageDir, 'subpaths.json');
@@ -507,7 +525,11 @@ export async function checkPackage(packageDir, { absWorkingDir = ROOT, nodePaths
     sourceResults.flatMap((r) => r.reached),
     { absWorkingDir, nodePaths, packageDir },
   );
-  errors.push(...(await unlistedTestErrors(packageDir, subpaths, rootOnly, { absWorkingDir, nodePaths, forbidden })));
+  // Tag-aware: root-only sources, plus the tag-aware subpaths' own sources and built files.
+  const tagAwareFiles = new Set([...rootOnly, ...forbiddenFiles.filter(isFile).map((f) => realpathSync(f))]);
+  errors.push(
+    ...(await unlistedTestErrors(packageDir, subpaths, tagAwareFiles, { absWorkingDir, nodePaths, forbidden, packageName: pkg.name, tagAwareSubpaths: aware })),
+  );
   const rel = (f) => toPosix(relative(absWorkingDir, f));
   const results = [
     ...sourceResults.map(({ entry, violations, reached }) => ({ entry, violations: [...violations, ...hoistedRootSources(reached, rootOnly, rel)] })),
@@ -524,27 +546,27 @@ export async function checkPackage(packageDir, { absWorkingDir = ROOT, nodePaths
  * none of them root-only, and no forbidden module. Errors: a tag-agnostic test nobody lists
  * (it would run unguarded), and a listed test that reaches tag-aware code.
  */
-async function unlistedTestErrors(packageDir, subpaths, rootOnly, { absWorkingDir, nodePaths, forbidden = DEFAULT_FORBIDDEN }) {
+async function unlistedTestErrors(packageDir, subpaths, tagAwareFiles, { absWorkingDir, nodePaths, forbidden = DEFAULT_FORBIDDEN, packageName, tagAwareSubpaths = [] }) {
   const testsDir = join(packageDir, 'tests');
   if (!existsSync(testsDir)) return [];
   const isForbidden = makeIsForbidden(forbidden);
+  // The package imported by its own name: its tag-aware subpaths (`polytag`, not `polytag/formats`).
+  const selfAware = new Set(tagAwareSubpaths.map((k) => (k === '.' ? packageName : `${packageName}${k.slice(1)}`)));
+  const isTagAwareImport = (spec) => isForbidden(spec) || selfAware.has(spec);
   const listed = new Set(Object.values(subpaths).filter((s) => !s.tagAware).flatMap((s) => s.tests ?? []));
-  const inPkg = (f) => toPosix(relative(packageDir, f));
+  const own = isOwnFile(packageDir);
   const tests = readdirSync(testsDir, { recursive: true })
     .map((f) => toPosix(join('tests', String(f))))
     .filter((f) => /\.test\.[cm]?[jt]sx?$/.test(f) && !f.startsWith('tests/agnostic/'))
     .sort();
   const errors = [];
   for (const test of tests) {
-    // Bare imports stay external: they are judged by name, and nothing needs bundling them.
-    const { metafile } = await build({ entryPoints: [join(packageDir, test)], absWorkingDir, nodePaths, bundle: true, write: false, metafile: true, platform: 'node', format: 'esm', logLevel: 'silent', packages: 'external' });
-    const own = Object.keys(metafile.inputs)
-      .map((path) => realpathOr(resolve(absWorkingDir, path)))
-      .filter((f) => { const r = inPkg(f); return !r.startsWith('..') && !r.startsWith('tests/') && !r.includes('node_modules/'); });
+    const { metafile } = await bundleGraph(join(packageDir, test), { absWorkingDir, nodePaths, external: true });
+    const reached = Object.keys(metafile.inputs).map((path) => realpathOr(resolve(absWorkingDir, path))).filter(own);
     const externals = Object.values(metafile.inputs).flatMap((input) => input.imports.filter((i) => i.external).map((i) => i.path));
-    const tagAware = own.some((f) => rootOnly.has(f)) || externals.some(isForbidden);
+    const tagAware = reached.some((f) => tagAwareFiles.has(f)) || externals.some(isTagAwareImport);
     if (listed.has(test) && tagAware) errors.push(`subpaths.json lists ${test} as tag-agnostic, but it reaches tag-aware code`);
-    if (!listed.has(test) && !tagAware && own.length) {
+    if (!listed.has(test) && !tagAware && reached.length) {
       errors.push(`${test} tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)`);
     }
   }
@@ -558,10 +580,10 @@ async function unlistedTestErrors(packageDir, subpaths, rootOnly, { absWorkingDi
 async function rootOwnedSources(rootSources, agnosticReached, { absWorkingDir, nodePaths, packageDir }) {
   if (!rootSources.length) return new Set();
   const agnostic = new Set(agnosticReached.map((f) => realpathOr(f)));
-  const own = (f) => !toPosix(relative(packageDir, f)).startsWith('..') && !toPosix(f).includes('/node_modules/');
+  const own = isOwnFile(packageDir, { tests: true });
   const out = new Set();
   for (const entry of rootSources) {
-    const { metafile } = await build({ entryPoints: [entry], absWorkingDir, nodePaths, bundle: true, write: false, metafile: true, platform: 'node', format: 'esm', logLevel: 'silent', ignoreAnnotations: true });
+    const { metafile } = await bundleGraph(entry, { absWorkingDir, nodePaths });
     for (const path of Object.keys(metafile.inputs)) {
       const abs = realpathOr(resolve(absWorkingDir, path));
       if (isFile(abs) && own(abs) && !agnostic.has(abs) && !/\.(c|m)?js$/.test(abs)) out.add(abs);

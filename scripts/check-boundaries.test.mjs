@@ -1,4 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -254,14 +256,30 @@ describe('check-boundaries, whole package (subpaths.json + exports)', () => {
   });
 
   // i2mint/polytag#26: the guarded test run reads each tag-agnostic subpath's `tests`.
+  const LISTING_ERRORS = [
+    'subpaths.json lists tests/listed-imports-groups.test.ts as tag-agnostic, but it reaches tag-aware code',
+    'tests/unlisted.test.ts tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)',
+    'subpaths.json lists tests/wrongly-listed.test.ts as tag-agnostic, but it reaches tag-aware code',
+  ];
+
   it('fails a tag-agnostic test nobody lists, and a listed test that reaches tag-aware code; ignores the rest', async () => {
     const { errors } = await checkFixturePackage('pkg-tests-listing');
-    expect(errors).toEqual([
-      'tests/unlisted.test.ts tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)',
-      'subpaths.json lists tests/wrongly-listed.test.ts as tag-agnostic, but it reaches tag-aware code',
-    ]);
-    // not flagged: views.test.ts (listed), root.test.ts (tag-aware, unlisted), uses-groups.test.ts
-    // (imports groups), no-sources.test.ts (reaches none of the package's sources)
+    expect(errors).toEqual(LISTING_ERRORS);
+    // Not flagged: views.test.ts (listed); root.test.ts, self-import.test.ts (the package by its
+    // own name), built-root.test.ts (the root's built file), uses-groups.test.ts (all tag-aware,
+    // unlisted); no-sources.test.ts (reaches no source); tests/agnostic/ (always guarded).
+  });
+
+  it('gives the same answer through a symlinked package path (bundled inputs are real paths)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'polytag-link-'));
+    try {
+      const link = join(dir, 'pkg');
+      symlinkSync(join(fixtures, 'pkg-tests-listing'), link, 'dir');
+      const { errors } = await checkPackage(link, { absWorkingDir: fixtures, nodePaths: [join(fixtures, 'modules')] });
+      expect(errors).toEqual(LISTING_ERRORS);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('fails a tag-agnostic subpath export without a types file', async () => {

@@ -1,4 +1,4 @@
 {
   ".": { "source": "src/index.ts", "tagAware": true },
-  "./views": { "source": "src/views/index.ts", "tests": ["tests/views.test.ts", "tests/wrongly-listed.test.ts"] }
+  "./views": { "source": "src/views/index.ts", "tests": ["tests/views.test.ts", "tests/wrongly-listed.test.ts", "tests/listed-imports-groups.test.ts"] }
 }
