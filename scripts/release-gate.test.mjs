@@ -205,6 +205,12 @@ describe('isPublished', () => {
     await expect(isPublished('polytag', '0.0.0', { fetchImpl: fakeFetch(503) })).rejects.toThrow(/503/);
   });
 
+  it('times out a hung request instead of waiting on it', async () => {
+    const hung = (url, { signal }) =>
+      new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason)));
+    await expect(isPublished('polytag', '0.0.0', { fetchImpl: hung, timeoutMs: 5 })).rejects.toThrow(/timeout|aborted/i);
+  });
+
   it('encodes scoped names as the registry expects', async () => {
     let seen = '';
     await isPublished('@zodal/core', '0.2.0', {
@@ -270,9 +276,16 @@ describe('the workspace: what pnpm -r publish publishes', () => {
     expect(publicSpecs(root, { listWorkspace })).toEqual(['a@1.0.0']);
   });
 
-  it('says so when pnpm cannot list the workspace', () => {
-    const missing = join(root, 'does-not-exist');
-    expect(() => workspaceDirs(missing)).toThrow(/cannot list the pnpm workspace/);
+  it('fails closed, with pnpm\'s reason, when pnpm cannot list the workspace', () => {
+    // Outside any workspace: pnpm walks up to the nearest one.
+    const empty = mkdtempSync(join(tmpdir(), 'polytag-empty-'));
+    expect(() => workspaceDirs(empty)).toThrow(/cannot list the pnpm workspace: pnpm lists nothing/);
+    const broken = mkdtempSync(join(tmpdir(), 'polytag-broken-'));
+    writeFileSync(join(broken, 'package.json'), '{ not json');
+    expect(() => workspaceDirs(broken)).toThrow(/cannot list the pnpm workspace: .+/);
+    expect(() => workspaceDirs(broken)).not.toThrow(/Command failed/);
+    rmSync(empty, { recursive: true, force: true });
+    rmSync(broken, { recursive: true, force: true });
   });
 
   it("this repo's manifests include the private playground (a private-flag change moves the window)", () => {

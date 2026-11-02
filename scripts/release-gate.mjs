@@ -162,7 +162,9 @@ export function pnpmWorkspaceDirs(root = ROOT) {
   try {
     out = execFileSync('pnpm', ['ls', '-r', '--depth', '-1', '--json'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (err) {
-    throw new Error(`cannot list the pnpm workspace (is pnpm on PATH?): ${err.message.split('\n')[0]}`);
+    const why = String(err.stdout || err.stderr || '').trim().split('\n')[0] || err.message.split('\n')[0];
+    const hint = err.code === 'ENOENT' && existsSync(root) ? ' (is pnpm on PATH?)' : '';
+    throw new Error(`cannot list the pnpm workspace${hint}: ${why}`);
   }
   if (!out.trim()) throw new Error(`cannot list the pnpm workspace: pnpm lists nothing at ${root} (no package.json / pnpm-workspace.yaml?)`);
   return JSON.parse(out).map((p) => p.path);
@@ -257,10 +259,11 @@ export async function isPublished(
 }
 
 async function main() {
-  const publics = publicPackages();
+  const manifests = packageManifests(); // one pnpm call for both uses below
+  const publics = publicPackages(ROOT, { listWorkspace: () => [ROOT, ...manifests.map((m) => join(ROOT, dirname(m)))] });
   const isReleased = async (tag) =>
     (await Promise.all(publics.map((p) => isPublished(p.name, tag.slice(1))))).some(Boolean);
-  const subjects = await releaseWindowSubjects(ROOT, { isReleased });
+  const subjects = await releaseWindowSubjects(ROOT, { manifests, isReleased });
   const packages = await Promise.all(publics.map(async (p) => ({ ...p, published: await isPublished(p.name, p.version) })));
   const headSubject = execFileSync('git', ['log', '-1', '--format=%s'], { cwd: ROOT, encoding: 'utf8' }).trim();
   const { publish, force, notice, reason } = decideRelease({ subjects, packages, headSubject });
