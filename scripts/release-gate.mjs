@@ -25,8 +25,9 @@
  * the publish job's concurrency group keeps one pending run and cancels the older one, so
  * the intermediate version is never released (bump again, or publish it by hand, to keep it).
  *
- * Usage (CI):  node scripts/release-gate.mjs   -> writes publish=, force= to $GITHUB_OUTPUT
- * API:         decideRelease, hasMarker, releaseWindowSubjects, isPublished, publicPackages
+ * Usage (CI):  node scripts/release-gate.mjs          -> writes publish=, force= to $GITHUB_OUTPUT
+ *              node scripts/release-gate.mjs --list   -> prints name@version of each public package, one per line
+ * API:         decideRelease, hasMarker, releaseWindowSubjects, isPublished, publicPackages, publicSpecs
  */
 
 import { execFileSync } from 'node:child_process';
@@ -150,6 +151,11 @@ export function publicPackages(root = ROOT) {
     .map(({ name, version, manifest }) => ({ name, version, manifest }));
 }
 
+/** `name@version` of each public package: what a publish releases, and what the registry must then serve. */
+export function publicSpecs(root = ROOT) {
+  return publicPackages(root).map(({ name, version }) => `${name}@${version}`);
+}
+
 /**
  * Is `name@version` on the registry? 404 means no; any other non-2xx throws, so a
  * registry outage never reads as "unpublished".
@@ -175,4 +181,7 @@ async function main() {
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `publish=${publish}\nforce=${force}\n`);
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) await main();
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  if (process.argv.includes('--list')) console.log(publicSpecs().join('\n'));
+  else await main();
+}

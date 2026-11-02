@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { decideRelease, hasMarker, isPublished, publicPackages, releaseWindowSubjects } from './release-gate.mjs';
+import { decideRelease, hasMarker, isPublished, publicPackages, publicSpecs, releaseWindowSubjects } from './release-gate.mjs';
 
 const unpublished = [{ name: 'polytag', version: '0.1.0', published: false }];
 const published = [{ name: 'polytag', version: '0.1.0', published: true }];
@@ -204,5 +205,17 @@ describe('publicPackages', () => {
     expect(publicPackages().map(({ name, manifest }) => ({ name, manifest }))).toEqual([
       { name: 'polytag', manifest: join('packages', 'polytag', 'package.json') },
     ]);
+  });
+});
+
+describe('publicSpecs and --list', () => {
+  it('lists name@version of each public package, the same set publicPackages gives', () => {
+    expect(publicSpecs()).toEqual(publicPackages().map((p) => `${p.name}@${p.version}`));
+  });
+
+  it('--list prints them one per line, with no registry or git access', () => {
+    const script = fileURLToPath(new URL('./release-gate.mjs', import.meta.url));
+    const out = execFileSync(process.execPath, [script, '--list'], { encoding: 'utf8' });
+    expect(out.trim().split('\n')).toEqual(publicSpecs());
   });
 });
