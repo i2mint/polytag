@@ -147,6 +147,8 @@ jobs:
           set -euo pipefail
           # The same list of public packages the release gate decided on.
           SPECS=$(node scripts/release-gate.mjs --list)
+          # Fail closed: an empty list would verify nothing and pass.
+          [ -n "$SPECS" ] || { echo "::error::no public package to verify"; exit 1; }
           for spec in $SPECS; do
             version="${spec##*@}"
             confirmed=""

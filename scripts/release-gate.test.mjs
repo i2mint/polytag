@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -209,13 +209,28 @@ describe('publicPackages', () => {
 });
 
 describe('publicSpecs and --list', () => {
-  it('lists name@version of each public package, the same set publicPackages gives', () => {
-    expect(publicSpecs()).toEqual(publicPackages().map((p) => `${p.name}@${p.version}`));
+  const root = mkdtempSync(join(tmpdir(), 'polytag-specs-'));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  const pkg = (dir, fields) => {
+    mkdirSync(join(root, 'packages', dir), { recursive: true });
+    writeFileSync(join(root, 'packages', dir, 'package.json'), JSON.stringify(fields));
+  };
+  pkg('a', { name: '@scope/a', version: '1.2.0-beta.1' });
+  pkg('b', { name: 'b', version: '0.1.0', private: true });
+  mkdirSync(join(root, 'packages', 'not-a-package'));
+
+  it('lists name@version of each public package, skipping private ones and dirs without a manifest', () => {
+    expect(publicSpecs(root)).toEqual(['@scope/a@1.2.0-beta.1']);
   });
 
-  it('--list prints them one per line, with no registry or git access', () => {
+  it('--list prints this repo\'s public packages, one per line, with no git and no network', () => {
     const script = fileURLToPath(new URL('./release-gate.mjs', import.meta.url));
-    const out = execFileSync(process.execPath, [script, '--list'], { encoding: 'utf8' });
-    expect(out.trim().split('\n')).toEqual(publicSpecs());
+    const { version } = JSON.parse(readFileSync(new URL('../packages/polytag/package.json', import.meta.url), 'utf8'));
+    const noFetch = 'data:text/javascript,globalThis.fetch=()=>{throw new Error("network")}';
+    const out = execFileSync(process.execPath, ['--import', noFetch, script, '--list'], {
+      encoding: 'utf8',
+      env: { PATH: '/nonexistent' }, // no git on PATH
+    });
+    expect(out).toBe(`polytag@${version}\n`);
   });
 });
