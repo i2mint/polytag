@@ -20,10 +20,11 @@
 | `packages/polytag/tests/` | vitest; `roundtrip.test.ts` is **the round-trip gate** (every grammar × format × RD/P/K must equal what the loss report predicts), `fuzz.test.ts` its seeded property-test twin, `review.test.ts` and `verify.test.ts` the PR #16 review and verification regressions; `exports.test.ts` loads every built subpath under import and require, `types-resolution.test.ts` resolves its types under node10 / node16 / bundler |
 | `apps/playground` | private Vite + TS app (vanilla), not published |
 | `scripts/check-boundaries.mjs` | boundary check: tag-agnostic sources, built JS and `.d.ts` never reach `@zodal/groups-*` or the root; tests + fixtures beside it |
+| `scripts/boundary-guard.mjs` | runtime boundary guard, in Node's loader (`module.registerHooks`) and vitest's (a vite plugin): `packages/polytag/vitest.agnostic.config.ts` reruns each tag-agnostic subpath's `tests` (from `subpaths.json`) plus `tests/agnostic/` (self-check, built entries) with every load of `@zodal/groups-*` refused; patterns shared with the static check in `boundary-patterns.mjs` |
 | `skills/polytag/SKILL.md` | the shipped **usage** skill (i2mint/polytag#6); its tables are generated: after changing a format, grammar or the `@zodal/groups-core` dev version, run `pnpm build && node scripts/gen-skill-tables.mjs` (`gen-skill-tables.test.mjs` fails on drift) |
 | `scripts/release-gate.mjs` | CI release decision: a subject ending in `[publish]` since the last released `v*` tag and the last version change + an unpublished version |
 
-Commands: `pnpm install && pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries`. A new subpath goes in `subpaths.json`, `package.json` `exports` (with `types` for every condition) and `typesVersions`, and `tests/exports.test.ts` `EXPECTED`; the boundary check fails if `subpaths.json` and `exports` disagree. A deliberate non-literal `import()` in tag-agnostic code needs a `boundary-check: allow-dynamic` comment.
+Commands: `pnpm install && pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries`. A new subpath goes in `subpaths.json` (with its tag-agnostic `tests`), `package.json` `exports` (with `types` for every condition) and `typesVersions`, and `tests/exports.test.ts` `EXPECTED`; the boundary check fails if `subpaths.json` and `exports` disagree. A deliberate non-literal `import()` in tag-agnostic code needs a `boundary-check: allow-dynamic` comment.
 
 ## Skills
 

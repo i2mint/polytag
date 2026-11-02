@@ -79,7 +79,7 @@
   "scripts": {
     "build": "tsup",
     "prepublishOnly": "pnpm build",
-    "test": "vitest run",
+    "test": "vitest run && vitest run -c vitest.agnostic.config.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json"
   },
   "peerDependencies": {
