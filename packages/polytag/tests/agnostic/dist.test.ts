@@ -1,6 +1,6 @@
 /**
  * Every tag-agnostic subpath's BUILT files load, under `import` and `require`, in a plain Node
- * process with the boundary guard installed: what the published package executes reaches no
+ * process with the boundary guard installed: what loading the published entries executes reaches no
  * `@zodal/groups-*`. A child process, because vitest would run an ESM `import()` of these
  * files itself instead of through Node's loader. Runs after `build` (turbo: test dependsOn build).
  */
