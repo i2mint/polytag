@@ -15,7 +15,6 @@ import {
   releaseWindowSubjects,
   verifyPublished,
   workspaceDirs,
-  workspaceGlobs,
 } from './release-gate.mjs';
 
 const unpublished = [{ name: 'polytag', version: '0.1.0', published: false }];
@@ -99,6 +98,9 @@ describe('releaseWindowSubjects', () => {
   const decide = async (version, options) =>
     decideRelease({ subjects: await window(options), packages: [{ name: 'p', version, published: false }] });
   git('init', '-q', '-b', 'main');
+  writeFileSync(join(repo, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
+  writeFileSync(join(repo, 'package.json'), '{ "name": "root", "private": true }\n');
+  git('add', '-A');
   commit('first');
 
   it('reads the whole first-parent history while nothing bounds it', async () => {
@@ -227,6 +229,7 @@ describe('publicSpecs and --list', () => {
     mkdirSync(join(root, 'packages', dir), { recursive: true });
     writeFileSync(join(root, 'packages', dir, 'package.json'), JSON.stringify(fields));
   };
+  writeFileSync(join(root, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
   pkg('a', { name: '@scope/a', version: '1.2.0-beta.1' });
   pkg('b', { name: 'b', version: '0.1.0', private: true });
   mkdirSync(join(root, 'packages', 'not-a-package'));
@@ -235,49 +238,41 @@ describe('publicSpecs and --list', () => {
     expect(publicSpecs(root)).toEqual(['@scope/a@1.2.0-beta.1']);
   });
 
-  it('--list prints this repo\'s public packages, one per line, with no git and no network', () => {
+  it('--list prints this repo\'s public packages, one per line, with no network', () => {
     const script = fileURLToPath(new URL('./release-gate.mjs', import.meta.url));
     const { version } = JSON.parse(readFileSync(new URL('../packages/polytag/package.json', import.meta.url), 'utf8'));
     const noFetch = 'data:text/javascript,globalThis.fetch=()=>{throw new Error("network")}';
-    const out = execFileSync(process.execPath, ['--import', noFetch, script, '--list'], {
-      encoding: 'utf8',
-      env: { PATH: '/nonexistent' }, // no git on PATH
-    });
+    const out = execFileSync(process.execPath, ['--import', noFetch, script, '--list'], { encoding: 'utf8' });
     expect(out).toBe(`polytag@${version}\n`);
   });
 });
 
 describe('the workspace: what pnpm -r publish publishes', () => {
-  it('reads the packages: globs, quoted or bare, ignoring other keys and comments', () => {
-    const yaml = "packages:\n  - 'packages/*'\n  - \"apps/*\" # the apps\n  - tools\n  - '!apps/legacy'\nonlyBuiltDependencies:\n  - esbuild\n";
-    expect(workspaceGlobs(yaml)).toEqual(['packages/*', 'apps/*', 'tools', '!apps/legacy']);
-  });
-
   const root = mkdtempSync(join(tmpdir(), 'polytag-ws-'));
   afterAll(() => rmSync(root, { recursive: true, force: true }));
   const pkg = (dir, fields) => {
     mkdirSync(join(root, dir), { recursive: true });
     writeFileSync(join(root, dir, 'package.json'), JSON.stringify(fields));
   };
+  pkg('.', { name: 'root', private: true });
   pkg('packages/a', { name: 'a', version: '1.0.0' });
   pkg('apps/public-app', { name: 'public-app', version: '1.0.0' });
-  pkg('apps/legacy', { name: 'legacy', version: '0.1.0' });
   pkg('apps/private-app', { name: 'private-app', version: '0.0.0', private: true });
+  writeFileSync(join(root, 'pnpm-workspace.yaml'), "packages: ['packages/*', apps/*]\n"); // flow style: pnpm's reading, not ours
 
-  it('expands dir/* and exclusions; finds a public package outside packages/ (review of #23)', () => {
-    writeFileSync(join(root, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n  - 'apps/*'\n  - '!apps/legacy'\n");
-    expect(workspaceDirs(root).sort()).toEqual(['apps/private-app', 'apps/public-app', 'packages/a']);
+  it('lists what pnpm lists (any YAML style), root excluded, a public package outside packages/ included (review of #23)', () => {
+    expect(workspaceDirs(root).sort()).toEqual([join('apps', 'private-app'), join('apps', 'public-app'), join('packages', 'a')]);
     expect(publicSpecs(root).sort()).toEqual(['a@1.0.0', 'public-app@1.0.0']);
   });
 
-  it('refuses a glob it cannot expand rather than shrinking the list', () => {
-    writeFileSync(join(root, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/**'\n");
-    expect(() => workspaceDirs(root)).toThrow(/unsupported glob 'packages\/\*\*'/);
+  it('takes the listing as a seam (absolute dirs, root included)', () => {
+    const listWorkspace = () => [root, join(root, 'packages', 'a')];
+    expect(publicSpecs(root, { listWorkspace })).toEqual(['a@1.0.0']);
   });
 
-  it('falls back to packages/* without a workspace file', () => {
-    rmSync(join(root, 'pnpm-workspace.yaml'));
-    expect(workspaceDirs(root)).toEqual(['packages/a']);
+  it('says so when pnpm cannot list the workspace', () => {
+    const missing = join(root, 'does-not-exist');
+    expect(() => workspaceDirs(missing)).toThrow(/cannot list the pnpm workspace/);
   });
 
   it("this repo's manifests include the private playground (a private-flag change moves the window)", () => {

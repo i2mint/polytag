@@ -64,6 +64,8 @@ jobs:
         with:
           fetch-depth: 0 # the history back to the last release or version change
 
+      - uses: pnpm/action-setup@v5 # the gate lists the workspace with `pnpm ls -r` (no install)
+
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -148,8 +150,8 @@ jobs:
         run: node scripts/release-gate.mjs --verify
 
       - name: Tag release
-        # The tag is v<version> of the public packages (the gate fails if their versions
-        # disagree). Pushed with the job's GITHUB_TOKEN (persisted by actions/checkout). A
+        # The tag is v<version> of the public packages (the gate refuses to publish when
+        # their versions disagree). Pushed with the job's GITHUB_TOKEN (persisted by actions/checkout). A
         # failed push fails the job: a version on npm without its tag must not look green.
         run: |
           set -euo pipefail
