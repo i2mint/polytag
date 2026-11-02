@@ -30,6 +30,14 @@ describe('decideRelease', () => {
     expect(d.reason).toMatch(/polytag@0\.1\.0 not on the registry, but no subject/);
   });
 
+  it('notices only when this push asked for a release that will not happen, or a version waits', () => {
+    const notice = (subjects, packages, headSubject) => decideRelease({ subjects, packages, headSubject }).notice;
+    expect(notice(['docs: x', 'feat: y [publish]'], published, 'docs: x')).toBe(false); // every push after a release
+    expect(notice(['chore: again [publish]'], published, 'chore: again [publish]')).toBe(true); // asked, nothing to publish
+    expect(notice(['feat: x'], unpublished, 'feat: x')).toBe(true); // a version waits for a marker
+    expect(notice(['feat: x [publish]'], unpublished, 'feat: x [publish]')).toBe(false); // publishing
+  });
+
   it('[force publish] arms a release and sets force', () => {
     expect(decideRelease({ subjects: ['x [force publish]'], packages: unpublished })).toMatchObject({
       publish: true,
@@ -114,6 +122,14 @@ describe('releaseWindowSubjects', () => {
     git('tag', '-a', 'v0.2.0', '-m', 'Release v0.2.0');
     commit('docs: after the release');
     expect(await window()).toEqual(['docs: after the release']);
+  });
+
+  it('reads the tag name right even when a branch shares it (refs/tags/v0.2.0 vs refs/heads/v0.2.0)', async () => {
+    git('branch', 'v0.2.0');
+    const seen = [];
+    await window({ isReleased: async (tag) => (seen.push(tag), true) });
+    git('branch', '-D', 'v0.2.0');
+    expect(seen).toEqual(['v0.2.0']);
   });
 
   it('a tag whose version is not on the registry does not bound the window', async () => {

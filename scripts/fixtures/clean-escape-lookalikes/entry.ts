@@ -17,3 +17,13 @@ export class Box { me() { const self = this; return self; } }
 export const unpack = (o: { global: number }) => { const { global } = o; return global; };
 export const isFn = (x: unknown) => x instanceof Function;
 export const run = (expr: { eval(): number }) => expr.eval();
+// Browser feature detection and plain reads (re-review findings 2, 3).
+export const hasStorage = 'localStorage' in globalThis;
+export const isBrowser = typeof window === 'object' && window !== null;
+export const storage = () => { const { localStorage } = window; return localStorage; };
+export const headless = () => !window;
+export const install = (x: object) => Object.assign(globalThis, x);
+export const root = typeof globalThis !== 'undefined' ? globalThis : window;
+export const isPlain = (C: unknown) => Function.prototype.toString.call(C);
+export const isFnCtor = (x: { constructor: unknown }) => x.constructor === Function;
+export const canRequire = typeof require !== 'undefined';

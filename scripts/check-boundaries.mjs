@@ -20,8 +20,7 @@
  *    forbidden package (catches type-only imports), an `import()`/`require()` whose
  *    argument is not a string literal, or any other runtime loader esbuild cannot follow
  *    (`require` aliased or not in call position, `module.require`, `createRequire`, `eval`,
- *    `Function`, a computed member of `globalThis`/`global`/`self`/`window`, a global object
- *    used as a value), unless the line, or the one above, says
+ *    `Function`, a computed member of `globalThis`/`global`/`self`/`window`), unless the line, or the one above, says
  *    `boundary-check: allow-dynamic` in a comment. The threat model is accidental coupling
  *    (see ESCAPE_NAMES). In a dependency, a forbidden
  *    package among its dependencies, peerDependencies or optionalDependencies.
@@ -96,7 +95,7 @@ function dependencyViolations(packageJsonPath, isForbidden, rel) {
  * Runtime loaders esbuild cannot follow, as written by accident or by a well-meaning
  * workaround: `require` aliased or not in call position (`const r = require`,
  * `require.call`), `module.require`, `createRequire`, `eval`, `new Function`, a computed
- * member of a global object (`globalThis['req' + 'uire']`), a global object used as a value.
+ * member of a global object (`globalThis['req' + 'uire']`).
  *
  * Threat model: accidental coupling, not an adversary. A determined author can always reach
  * a module at runtime (`Module._load`, `''.constructor.constructor`, `vm`...), and no
@@ -106,8 +105,31 @@ function dependencyViolations(packageJsonPath, isForbidden, rel) {
  */
 export const ESCAPE_NAMES = new Set(['require', 'createRequire', 'eval', 'Function']);
 
-/** Global objects whose computed members, or aliases, can reach an escape. */
+/** Global objects whose computed members (`globalThis[name]`) can reach an escape. */
 export const GLOBAL_OBJECTS = new Set(['globalThis', 'global', 'self', 'window']);
+
+/** Members of an escape name that invoke it (`require.call(null, n)`). */
+const CALLING_MEMBERS = new Set(['call', 'apply', 'bind', 'constructor']);
+
+/** Operators whose operands are only compared, never run. */
+const COMPARISONS = new Set([
+  ts.SyntaxKind.InstanceOfKeyword,
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+]);
+
+/**
+ * Is `node` inside esbuild's `var __require = ...` shim, which a built ESM file carries when
+ * its source calls `require('literal')`? The source itself is scanned, so the shim adds nothing.
+ */
+function isInEsbuildRequireShim(node) {
+  for (let n = node.parent; n; n = n.parent) {
+    if (ts.isVariableDeclaration(n)) return ts.isIdentifier(n.name) && n.name.text === '__require';
+  }
+  return false;
+}
 
 /** `node` without the parentheses and type assertions around it: `(globalThis as any)` -> `globalThis`. */
 function unwrap(node) {
@@ -122,13 +144,6 @@ function unwrap(node) {
     n = n.expression;
   }
   return n;
-}
-
-/** The nearest ancestor of `node` that is not a parenthesis or type assertion around it, and that wrapper. */
-function outerUse(node) {
-  let child = node;
-  while (child.parent && unwrap(child.parent) === node) child = child.parent;
-  return { child, parent: child.parent };
 }
 
 /** Is `node` inside a type (`f: Function`, `typeof eval` in a type), where it never runs? */
@@ -177,15 +192,12 @@ function escapeKind(node, isFree) {
   if (!isFree(node)) return undefined;
   if (ESCAPE_NAMES.has(node.text)) {
     if (node.text === 'require' && ts.isCallExpression(parent) && parent.expression === node) return undefined; // judged above
-    if (node.text === 'Function' && ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) return undefined;
+    if (ts.isTypeOfExpression(parent)) return undefined; // `typeof require !== 'undefined'`
+    // `Function.prototype.toString`, `require.resolve`: reading a member is not loading; `.call`/`.apply`/`.bind`/`.constructor` can be.
+    if (ts.isPropertyAccessExpression(parent) && parent.expression === node && !CALLING_MEMBERS.has(parent.name.text)) return undefined;
+    if (ts.isBinaryExpression(parent) && COMPARISONS.has(parent.operatorToken.kind)) return undefined; // `x instanceof Function`
+    if (isInEsbuildRequireShim(node)) return undefined;
     return 'runtime loader';
-  }
-  if (GLOBAL_OBJECTS.has(node.text)) {
-    const use = outerUse(node);
-    const plain =
-      ((ts.isPropertyAccessExpression(use.parent) || ts.isElementAccessExpression(use.parent)) && use.parent.expression === use.child) ||
-      ts.isTypeOfExpression(use.parent);
-    return plain ? undefined : 'global object alias';
   }
   return undefined;
 }
@@ -219,9 +231,11 @@ function allowedLines(source) {
  */
 function scanOwnFile(file) {
   // A one-file program with no lib: a name that resolves to nothing is a global.
-  const program = ts.createProgram([file], { noLib: true, noResolve: true, allowJs: true, types: [], noEmit: true });
-  const source = program.getSourceFile(file);
-  const checker = program.getTypeChecker();
+  // A JSON (or other non-script) input is not a program root: scan its literals only.
+  const script = /\.[cm]?[jt]sx?$/.test(file);
+  const program = script && ts.createProgram([file], { noLib: true, noResolve: true, allowJs: true, types: [], noEmit: true });
+  const source = program ? program.getSourceFile(file) : ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);
+  const checker = program && program.getTypeChecker();
   // Free: declared nowhere in this file (`globalThis` resolves to a built-in symbol with no declaration).
   const isFree = (id) => !(checker.getSymbolAtLocation(id)?.declarations ?? []).some((d) => d.getSourceFile() === source);
   const allowed = allowedLines(source);
@@ -229,7 +243,7 @@ function scanOwnFile(file) {
   const dynamicCalls = [];
   const visit = (node) => {
     if (ts.isStringLiteralLike(node)) literals.push(node.text);
-    const kind = escapeKind(node, isFree);
+    const kind = checker && escapeKind(node, isFree);
     if (kind) {
       const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line;
       if (!allowed.has(line)) dynamicCalls.push({ kind, line: line + 1, code: node.getText(source).slice(0, 80) });

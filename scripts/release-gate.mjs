@@ -54,13 +54,24 @@ export function hasMarker(subject, marker = PUBLISH_MARKER) {
  * @param {object} input
  * @param {string[]} input.subjects   Commit subjects in the release window.
  * @param {{name: string, version: string, published: boolean}[]} input.packages
- * @returns {{publish: boolean, force: boolean, armed: boolean, pending: string[], reason: string}}
+ * @param {string} [input.headSubject]  This push's own subject: a notice is due when it asked for a release that will not happen.
+ * @returns {{publish: boolean, force: boolean, armed: boolean, pending: string[], notice: boolean, reason: string}}
+ *   `notice`: say `reason` as a CI notice, because this push asked for a release that will
+ *   not happen, or a version waits for a marker. Silent otherwise (every push after a release).
  */
-export function decideRelease({ subjects, packages }) {
+export function decideRelease({ subjects, packages, headSubject = '' }) {
   const force = subjects.some((s) => hasMarker(s, FORCE_MARKER));
   const armed = force || subjects.some((s) => hasMarker(s, PUBLISH_MARKER));
   const pending = packages.filter((p) => !p.published).map((p) => `${p.name}@${p.version}`);
-  const decision = (publish, reason) => ({ publish, force: publish && force, armed, pending, reason });
+  const headAsked = hasMarker(headSubject, PUBLISH_MARKER) || hasMarker(headSubject, FORCE_MARKER);
+  const decision = (publish, reason) => ({
+    publish,
+    force: publish && force,
+    armed,
+    pending,
+    notice: !publish && (headAsked || pending.length > 0),
+    reason,
+  });
   if (!armed) {
     return decision(
       false,
@@ -106,7 +117,7 @@ export async function releaseWindowSubjects(
     touching.has(sha) && manifests.some((m) => publicVersion(sha, m) !== publicVersion(`${sha}^1`, m));
   const tagsAt = new Map();
   // `%(*objectname)` is the commit an annotated tag points at; empty for a lightweight tag.
-  for (const line of lines(git('for-each-ref', '--merged', 'HEAD', '--format=%(refname:short) %(objectname) %(*objectname)', 'refs/tags/v[0-9]*'))) {
+  for (const line of lines(git('for-each-ref', '--merged', 'HEAD', '--format=%(refname:lstrip=2) %(objectname) %(*objectname)', 'refs/tags/v[0-9]*'))) {
     const [tag, sha, peeled] = line.split(' ');
     const commit = peeled || sha;
     tagsAt.set(commit, [...(tagsAt.get(commit) ?? []), tag]);
@@ -157,12 +168,9 @@ async function main() {
     (await Promise.all(publics.map((p) => isPublished(p.name, tag.slice(1))))).some(Boolean);
   const subjects = await releaseWindowSubjects(ROOT, { isReleased });
   const packages = await Promise.all(publics.map(async (p) => ({ ...p, published: await isPublished(p.name, p.version) })));
-  const { publish, force, pending, reason } = decideRelease({ subjects, packages });
-  console.log(`subjects in the release window: ${subjects.length}`);
-  // Speak up only when this push asked for a release that will not happen, or a version waits for one.
   const headSubject = execFileSync('git', ['log', '-1', '--format=%s'], { cwd: ROOT, encoding: 'utf8' }).trim();
-  const headAsked = hasMarker(headSubject, PUBLISH_MARKER) || hasMarker(headSubject, FORCE_MARKER);
-  const notice = !publish && (headAsked || pending.length > 0);
+  const { publish, force, notice, reason } = decideRelease({ subjects, packages, headSubject });
+  console.log(`subjects in the release window: ${subjects.length}`);
   console.log(notice ? `::notice title=Release gate::${reason}` : reason);
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `publish=${publish}\nforce=${force}\n`);
 }

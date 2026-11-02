@@ -68,8 +68,9 @@ jobs:
         with:
           node-version: 22
 
-      # Publish iff a first-parent commit SUBJECT since the last released `v*` tag, and at or
-      # after the last change to a public package's version, ENDS with `[publish]` (bodies
+      # Publish iff a first-parent commit SUBJECT since the last released `v*` tag (one whose
+      # version is on the registry), and at or after the last change to a package's public
+      # identity (its version or private flag), ENDS with `[publish]` (bodies
       # never count) AND that version is not on the registry yet. Inside that window a marker
       # stays armed across pushes, so a cancelled release is not lost. Subjects are read with
       # git, never interpolated from the event payload. Full rules: scripts/release-gate.mjs.

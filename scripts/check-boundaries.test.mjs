@@ -83,8 +83,7 @@ describe('check-boundaries, runtime pass (esbuild metafile)', () => {
     [10, 'runtime loader', 'eval'],
     [11, 'computed global member', "(globalThis as any)['req' + 'uire']"],
     [12, 'runtime loader', "(globalThis as any)['require']"],
-    [13, 'global object alias', 'globalThis'],
-    [14, 'runtime loader', 'createRequire: cr'],
+    [13, 'runtime loader', 'createRequire: cr'],
   ])('fails line %i: %s `%s`', async (line, kind, code) => {
     const violations = await sources('violation-escape-hatches');
     expect(violations).toContainEqual({ kind, path: code, from: `violation-escape-hatches/entry.ts:${line}` });
@@ -92,11 +91,19 @@ describe('check-boundaries, runtime pass (esbuild metafile)', () => {
 
   it('flags no other line of the escape-hatch fixture', async () => {
     const lines = (await sources('violation-escape-hatches')).map((v) => Number(v.from.split(':')[1]));
-    expect([...new Set(lines)]).toEqual([2, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect([...new Set(lines)]).toEqual([2, 6, 7, 8, 9, 10, 11, 12, 13]);
   });
 
-  it('does not flag look-alikes: member names, types, typeof, named global members, locals named like globals, a marked escape', async () => {
+  it('does not flag look-alikes: member names, types, typeof, comparisons, feature detection, locals named like globals, a marked escape', async () => {
     expect(await sources('clean-escape-lookalikes')).toEqual([]);
+  });
+
+  it("scans an imported JSON file's literals without crashing", async () => {
+    expect(await sources('clean-json-import')).toEqual([]);
+  });
+
+  it("does not flag esbuild's own __require shim in a built ESM file", async () => {
+    expect(await sources('clean-esbuild-require-shim')).toEqual([]);
   });
 
   it('honours the allow marker only in a comment, not in a string on the same line', async () => {
