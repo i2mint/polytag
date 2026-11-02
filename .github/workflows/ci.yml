@@ -145,12 +145,10 @@ jobs:
       - name: Verify the registry serves this version
         run: |
           set -euo pipefail
-          SPECS=$(node -e '
-            const fs = require("fs");
-            for (const d of fs.readdirSync("packages")) {
-              const p = JSON.parse(fs.readFileSync(`packages/${d}/package.json`, "utf8"));
-              if (!p.private) console.log(`${p.name}@${p.version}`);
-            }')
+          # The same list of public packages the release gate decided on.
+          SPECS=$(node scripts/release-gate.mjs --list)
+          # Fail closed: an empty list would verify nothing and pass.
+          [ -n "$SPECS" ] || { echo "::error::no public package to verify"; exit 1; }
           for spec in $SPECS; do
             version="${spec##*@}"
             confirmed=""
