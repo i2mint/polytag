@@ -32,6 +32,9 @@
  *    declarations (tsup can hoist shared types into `index.d.ts`); a dependency that
  *    declares a forbidden package.
  *
+ * 3. Tests: every test of only tag-agnostic code is listed in its subpath's `tests` in
+ *    `subpaths.json`, which the runtime-guarded test run reads (see unlistedTestErrors).
+ *
  * Built files must exist (`pnpm build` first); anything that cannot be resolved or read
  * fails the check.
  *
@@ -43,7 +46,7 @@
  */
 
 import { build } from 'esbuild';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -504,12 +507,48 @@ export async function checkPackage(packageDir, { absWorkingDir = ROOT, nodePaths
     sourceResults.flatMap((r) => r.reached),
     { absWorkingDir, nodePaths, packageDir },
   );
+  errors.push(...(await unlistedTestErrors(packageDir, subpaths, rootOnly, { absWorkingDir, nodePaths, forbidden })));
   const rel = (f) => toPosix(relative(absWorkingDir, f));
   const results = [
     ...sourceResults.map(({ entry, violations, reached }) => ({ entry, violations: [...violations, ...hoistedRootSources(reached, rootOnly, rel)] })),
     ...checkDeclarations({ entries: [...new Set(declarations)], forbidden, forbiddenFiles, absWorkingDir, compilerOptions }),
   ];
   return { errors, results };
+}
+
+/**
+ * The guarded test run (`vitest.agnostic.config.ts`) covers each tag-agnostic subpath's
+ * `tests` in `subpaths.json`; this keeps that list honest (i2mint/polytag#26). A test file
+ * under `tests/` (not `tests/agnostic/`, which the guarded run always includes) is
+ * tag-agnostic when its static imports reach at least one of the package's own source files,
+ * none of them root-only, and no forbidden module. Errors: a tag-agnostic test nobody lists
+ * (it would run unguarded), and a listed test that reaches tag-aware code.
+ */
+async function unlistedTestErrors(packageDir, subpaths, rootOnly, { absWorkingDir, nodePaths, forbidden = DEFAULT_FORBIDDEN }) {
+  const testsDir = join(packageDir, 'tests');
+  if (!existsSync(testsDir)) return [];
+  const isForbidden = makeIsForbidden(forbidden);
+  const listed = new Set(Object.values(subpaths).filter((s) => !s.tagAware).flatMap((s) => s.tests ?? []));
+  const inPkg = (f) => toPosix(relative(packageDir, f));
+  const tests = readdirSync(testsDir, { recursive: true })
+    .map((f) => toPosix(join('tests', String(f))))
+    .filter((f) => /\.test\.[cm]?[jt]sx?$/.test(f) && !f.startsWith('tests/agnostic/'))
+    .sort();
+  const errors = [];
+  for (const test of tests) {
+    // Bare imports stay external: they are judged by name, and nothing needs bundling them.
+    const { metafile } = await build({ entryPoints: [join(packageDir, test)], absWorkingDir, nodePaths, bundle: true, write: false, metafile: true, platform: 'node', format: 'esm', logLevel: 'silent', packages: 'external' });
+    const own = Object.keys(metafile.inputs)
+      .map((path) => realpathOr(resolve(absWorkingDir, path)))
+      .filter((f) => { const r = inPkg(f); return !r.startsWith('..') && !r.startsWith('tests/') && !r.includes('node_modules/'); });
+    const externals = Object.values(metafile.inputs).flatMap((input) => input.imports.filter((i) => i.external).map((i) => i.path));
+    const tagAware = own.some((f) => rootOnly.has(f)) || externals.some(isForbidden);
+    if (listed.has(test) && tagAware) errors.push(`subpaths.json lists ${test} as tag-agnostic, but it reaches tag-aware code`);
+    if (!listed.has(test) && !tagAware && own.length) {
+      errors.push(`${test} tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)`);
+    }
+  }
+  return errors;
 }
 
 /**

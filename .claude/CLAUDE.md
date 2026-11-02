@@ -24,7 +24,7 @@
 | `skills/polytag/SKILL.md` | the shipped **usage** skill (i2mint/polytag#6); its tables are generated: after changing a format, grammar or the `@zodal/groups-core` dev version, run `pnpm build && node scripts/gen-skill-tables.mjs` (`gen-skill-tables.test.mjs` fails on drift) |
 | `scripts/release-gate.mjs` | CI release decision: a subject ending in `[publish]` since the last released `v*` tag and the last version change + an unpublished version; also the publish job's `--list`, `--tag`, `--verify` (one definition of the public packages: the pnpm workspace's non-private ones) |
 
-Commands: `pnpm install && pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries`. A new subpath goes in `subpaths.json` (with its tag-agnostic `tests`), `package.json` `exports` (with `types` for every condition) and `typesVersions`, and `tests/exports.test.ts` `EXPECTED`; the boundary check fails if `subpaths.json` and `exports` disagree. A deliberate non-literal `import()` in tag-agnostic code needs a `boundary-check: allow-dynamic` comment.
+Commands: `pnpm install && pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries`. A new subpath goes in `subpaths.json` (with its tag-agnostic `tests`; the boundary check fails on a tag-agnostic test nobody lists), `package.json` `exports` (with `types` for every condition) and `typesVersions`, and `tests/exports.test.ts` `EXPECTED`; the boundary check fails if `subpaths.json` and `exports` disagree. A deliberate non-literal `import()` in tag-agnostic code needs a `boundary-check: allow-dynamic` comment.
 
 ## Skills
 

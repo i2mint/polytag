@@ -253,6 +253,17 @@ describe('check-boundaries, whole package (subpaths.json + exports)', () => {
     expect(byEntry['pkg-hoisted-root-violation/src/views/index.ts']).toEqual([]);
   });
 
+  // i2mint/polytag#26: the guarded test run reads each tag-agnostic subpath's `tests`.
+  it('fails a tag-agnostic test nobody lists, and a listed test that reaches tag-aware code; ignores the rest', async () => {
+    const { errors } = await checkFixturePackage('pkg-tests-listing');
+    expect(errors).toEqual([
+      'tests/unlisted.test.ts tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)',
+      'subpaths.json lists tests/wrongly-listed.test.ts as tag-agnostic, but it reaches tag-aware code',
+    ]);
+    // not flagged: views.test.ts (listed), root.test.ts (tag-aware, unlisted), uses-groups.test.ts
+    // (imports groups), no-sources.test.ts (reaches none of the package's sources)
+  });
+
   it('fails a tag-agnostic subpath export without a types file', async () => {
     const { errors } = await checkFixturePackage('pkg-missing-types');
     expect(errors).toEqual([expect.stringMatching(/exports\['\.\/views'\] needs a types file for every condition \(missing at: import\)/)]);
