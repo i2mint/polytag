@@ -296,9 +296,11 @@ export async function checkSources({
   entries,
   forbidden = DEFAULT_FORBIDDEN,
   forbiddenFiles = [],
-  absWorkingDir = ROOT,
+  absWorkingDir: workingDir = ROOT,
   nodePaths = [],
 }) {
+  // esbuild reports inputs relative to the REAL working dir: resolve against the same one.
+  const absWorkingDir = realpathOr(workingDir);
   const isForbidden = makeIsForbidden(forbidden);
   const rel = (f) => toPosix(relative(absWorkingDir, f));
   const forbiddenSet = new Set(forbiddenFiles.map((f) => resolve(absWorkingDir, f)));
@@ -386,9 +388,11 @@ export function checkDeclarations({
   entries,
   forbidden = DEFAULT_FORBIDDEN,
   forbiddenFiles = [],
-  absWorkingDir = ROOT,
+  absWorkingDir: workingDir = ROOT,
   compilerOptions = {},
 }) {
+  // esbuild reports inputs relative to the REAL working dir: resolve against the same one.
+  const absWorkingDir = realpathOr(workingDir);
   const isForbidden = makeIsForbidden(forbidden);
   const forbiddenSet = new Set(forbiddenFiles.map((f) => realpathOr(resolve(absWorkingDir, f))));
   const rel = (f) => toPosix(relative(absWorkingDir, f));
@@ -475,10 +479,12 @@ function conditionsWithoutTypes(target, path = []) {
  * @param {object} [options]  `absWorkingDir`, `nodePaths`, `compilerOptions`, `forbidden` (see the passes).
  * @returns {Promise<{errors: string[], results: {entry: string, violations: object[]}[]}>}
  */
-export async function checkPackage(dir, { absWorkingDir = ROOT, nodePaths = [], compilerOptions, forbidden } = {}) {
-  // Bundled inputs come back as real paths: a symlinked `dir` (macOS /tmp) would make every
-  // one of them look foreign, and the checks that compare against the package pass vacuously.
+export async function checkPackage(dir, { absWorkingDir: workingDir = ROOT, nodePaths = [], compilerOptions, forbidden } = {}) {
+  // esbuild reports inputs relative to the real working dir, and they are compared as real
+  // paths: a symlinked package or working dir (macOS /tmp) would otherwise make every input
+  // look foreign, and the checks that compare against the package would pass vacuously.
   const packageDir = realpathOr(dir);
+  const absWorkingDir = realpathOr(workingDir);
   const errors = [];
   const pkg = readJson(join(packageDir, 'package.json'));
   const subpathsFile = join(packageDir, 'subpaths.json');
@@ -542,8 +548,9 @@ export async function checkPackage(dir, { absWorkingDir = ROOT, nodePaths = [], 
  * The guarded test run (`vitest.agnostic.config.ts`) covers each tag-agnostic subpath's
  * `tests` in `subpaths.json`; this keeps that list honest (i2mint/polytag#26). A test file
  * under `tests/` (not `tests/agnostic/`, which the guarded run always includes) is
- * tag-agnostic when its static imports reach at least one of the package's own source files,
- * none of them root-only, and no forbidden module. Errors: a tag-agnostic test nobody lists
+ * tag-agnostic when its static imports reach at least one of the package's own source files
+ * (or a tag-agnostic subpath by the package's name), nothing tag-aware (a root-only source,
+ * a tag-aware subpath's files or name) and no forbidden module. Errors: a tag-agnostic test nobody lists
  * (it would run unguarded), and a listed test that reaches tag-aware code.
  */
 async function unlistedTestErrors(packageDir, subpaths, tagAwareFiles, { absWorkingDir, nodePaths, forbidden = DEFAULT_FORBIDDEN, packageName, tagAwareSubpaths = [] }) {
@@ -551,7 +558,9 @@ async function unlistedTestErrors(packageDir, subpaths, tagAwareFiles, { absWork
   if (!existsSync(testsDir)) return [];
   const isForbidden = makeIsForbidden(forbidden);
   // The package imported by its own name: its tag-aware subpaths (`polytag`, not `polytag/formats`).
-  const selfAware = new Set(tagAwareSubpaths.map((k) => (k === '.' ? packageName : `${packageName}${k.slice(1)}`)));
+  const selfName = (k) => (k === '.' ? packageName : `${packageName}${k.slice(1)}`);
+  const selfAware = new Set(tagAwareSubpaths.map(selfName));
+  const selfAgnostic = new Set(Object.keys(subpaths).filter((k) => !subpaths[k].tagAware).map(selfName));
   const isTagAwareImport = (spec) => isForbidden(spec) || selfAware.has(spec);
   const listed = new Set(Object.values(subpaths).filter((s) => !s.tagAware).flatMap((s) => s.tests ?? []));
   const own = isOwnFile(packageDir);
@@ -566,7 +575,8 @@ async function unlistedTestErrors(packageDir, subpaths, tagAwareFiles, { absWork
     const externals = Object.values(metafile.inputs).flatMap((input) => input.imports.filter((i) => i.external).map((i) => i.path));
     const tagAware = reached.some((f) => tagAwareFiles.has(f)) || externals.some(isTagAwareImport);
     if (listed.has(test) && tagAware) errors.push(`subpaths.json lists ${test} as tag-agnostic, but it reaches tag-aware code`);
-    if (!listed.has(test) && !tagAware && reached.length) {
+    const testsAgnosticCode = reached.length > 0 || externals.some((spec) => selfAgnostic.has(spec)); // `polytag/views` by name
+    if (!listed.has(test) && !tagAware && testsAgnosticCode) {
       errors.push(`${test} tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)`);
     }
   }

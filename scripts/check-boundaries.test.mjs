@@ -258,6 +258,7 @@ describe('check-boundaries, whole package (subpaths.json + exports)', () => {
   // i2mint/polytag#26: the guarded test run reads each tag-agnostic subpath's `tests`.
   const LISTING_ERRORS = [
     'subpaths.json lists tests/listed-imports-groups.test.ts as tag-agnostic, but it reaches tag-aware code',
+    'tests/unlisted-by-name.test.ts tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)',
     'tests/unlisted.test.ts tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)',
     'subpaths.json lists tests/wrongly-listed.test.ts as tag-agnostic, but it reaches tag-aware code',
   ];
@@ -270,13 +271,28 @@ describe('check-boundaries, whole package (subpaths.json + exports)', () => {
     // unlisted); no-sources.test.ts (reaches no source); tests/agnostic/ (always guarded).
   });
 
-  it('gives the same answer through a symlinked package path (bundled inputs are real paths)', async () => {
+  // esbuild reports inputs relative to the REAL working dir; compared as real paths.
+  it.each([
+    ['a symlinked package path', true, false],
+    ['a symlinked working dir', false, true],
+    ['both symlinked', true, true],
+  ])('gives the same answers through %s', async (_, linkPackage, linkWorkingDir) => {
     const dir = mkdtempSync(join(tmpdir(), 'polytag-link-'));
     try {
-      const link = join(dir, 'pkg');
-      symlinkSync(join(fixtures, 'pkg-tests-listing'), link, 'dir');
-      const { errors } = await checkPackage(link, { absWorkingDir: fixtures, nodePaths: [join(fixtures, 'modules')] });
-      expect(errors).toEqual(LISTING_ERRORS);
+      const wd = linkWorkingDir ? join(dir, 'fixtures') : fixtures;
+      if (linkWorkingDir) symlinkSync(fixtures, wd, 'dir');
+      const pkgPath = (name) => {
+        if (!linkPackage) return join(wd, name);
+        const link = join(dir, `link-${name}`);
+        symlinkSync(join(fixtures, name), link, 'dir');
+        return link;
+      };
+      const options = { absWorkingDir: wd, nodePaths: [join(fixtures, 'modules')] };
+      expect((await checkPackage(pkgPath('pkg-tests-listing'), options)).errors).toEqual(LISTING_ERRORS);
+      // The code pass too: a built file's groups import and its literal mention survive the links.
+      const { results } = await checkPackage(pkgPath('pkg-built-violation'), options);
+      const kinds = results.flatMap((r) => r.violations.map((v) => v.kind));
+      expect(kinds).toEqual(expect.arrayContaining(['imports', 'mentions']));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
