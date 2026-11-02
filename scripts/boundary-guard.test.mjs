@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { BoundaryViolation, installBoundaryGuard } from './boundary-guard.mjs';
+import { BoundaryViolation, installBoundaryGuard, viteBoundaryGuard } from './boundary-guard.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixture = join(here, 'fixtures', 'runtime-guard');
@@ -64,5 +64,19 @@ describe('installBoundaryGuard (hooks driven directly)', () => {
 
   it('says which Node it needs when module.registerHooks is missing', () => {
     expect(() => installBoundaryGuard({ registerHooks: null })).toThrow(/Node >= 22\.15/);
+  });
+});
+
+describe('viteBoundaryGuard (the plugin for modules vitest runs itself)', () => {
+  const plugin = viteBoundaryGuard();
+
+  it('refuses a forbidden specifier at resolve and a forbidden file at load', () => {
+    expect(() => plugin.resolveId('@zodal/groups-core', '/r/src/a.ts')).toThrow(BoundaryViolation);
+    expect(() => plugin.load('/p/zodal-groups/packages/groups-core/src/index.ts')).toThrow(BoundaryViolation);
+  });
+
+  it('defers everything else to the other plugins (returns null)', () => {
+    expect(plugin.resolveId('@zodal/core', '/r/src/a.ts')).toBeNull();
+    expect(plugin.load('/r/src/a.ts')).toBeNull();
   });
 });

@@ -1,25 +1,33 @@
 /**
- * Runtime boundary guard: while it is installed, nothing in this process can load
- * `@zodal/groups-*`, however the load is written.
+ * Runtime boundary guard: refuse every load of `@zodal/groups-*` while tag-agnostic code runs.
  *
  * The static check (`check-boundaries.mjs`) catches the loaders written by accident; a
  * determined one (`Module._load`, `''.constructor.constructor`, `vm`,
- * `process.getBuiltinModule('module')`...) can always slip past a scan. Every one of them
- * still goes through Node's module loader, so a synchronous `module.registerHooks` resolve
- * hook (the specifier, and where it resolved to) plus a load hook (a file loaded by path
- * after `Module._resolveFilename`) sees them all, for `import` and `require` alike.
+ * `process.getBuiltinModule('module')`...) can always slip past a scan. Loads go through
+ * one of two loaders, and the guard covers both:
+ * - Node's (`installBoundaryGuard`): a synchronous `module.registerHooks` resolve hook (the
+ *   specifier, and where it resolved to) plus a load hook (a file loaded by path after
+ *   `Module._resolveFilename`), for `import` and `require` alike;
+ * - vitest's (`viteBoundaryGuard`): vitest runs every module outside `node_modules` itself
+ *   (a local checkout linked in, a file imported by path, anything inlined), so Node's hooks
+ *   never see those; a vite plugin refuses them at resolve and load.
  *
- * The tag-agnostic subpaths' tests run under it (`packages/polytag/vitest.agnostic.config.ts`,
- * through `boundary-guard.register.mjs`), so code that is only reached at call time is
+ * Not covered: a `worker_threads` Worker or a child process, which start their own loader
+ * without the hooks. Both are visible to the static check's reviewers, not to this guard.
+ *
+ * The tag-agnostic subpaths' tests run under both (`packages/polytag/vitest.agnostic.config.ts`,
+ * Node's through `boundary-guard.register.mjs`), so code reached only at call time is
  * guarded too, not just what loads at import.
  *
  * Requires Node >= 22.15 (or 23.5): `module.registerHooks`.
  *
- * API: installBoundaryGuard({ forbidden, registerHooks }), BoundaryViolation
+ * API: installBoundaryGuard({ registerHooks }), viteBoundaryGuard(), BoundaryViolation
  */
 
 import nodeModule from 'node:module';
-import { DEFAULT_FORBIDDEN, makeIsForbidden } from './boundary-patterns.mjs';
+import { makeIsForbidden } from './boundary-patterns.mjs';
+
+const isForbidden = makeIsForbidden();
 
 /** Thrown, from inside the loader, when something tries to load a forbidden module. */
 export class BoundaryViolation extends Error {
@@ -31,18 +39,16 @@ export class BoundaryViolation extends Error {
 }
 
 /**
- * Install the guard for the rest of this process.
+ * Install the guard in Node's loader for the rest of this thread.
  *
  * @param {object} [options]
- * @param {RegExp[]} [options.forbidden]  What may not be loaded (specifier, resolved URL or file path).
  * @param {Function} [options.registerHooks]  `module.registerHooks` (injectable for tests).
  * @returns {{ deregister(): void }}
  */
-export function installBoundaryGuard({ forbidden = DEFAULT_FORBIDDEN, registerHooks = nodeModule.registerHooks } = {}) {
+export function installBoundaryGuard({ registerHooks = nodeModule.registerHooks } = {}) {
   if (typeof registerHooks !== 'function') {
     throw new Error(`boundary guard needs module.registerHooks (Node >= 22.15 or 23.5); this is Node ${process.versions.node}`);
   }
-  const isForbidden = makeIsForbidden(forbidden);
   return registerHooks({
     resolve(specifier, context, nextResolve) {
       if (isForbidden(specifier)) throw new BoundaryViolation(specifier, context.parentURL);
@@ -55,4 +61,23 @@ export function installBoundaryGuard({ forbidden = DEFAULT_FORBIDDEN, registerHo
       return nextLoad(url, context);
     },
   });
+}
+
+/**
+ * The same guard as a vite plugin, for the modules vitest runs itself (see the module doc):
+ * refuses a forbidden specifier at resolve, and a forbidden file (however it was reached) at load.
+ */
+export function viteBoundaryGuard() {
+  return {
+    name: 'polytag-boundary-guard',
+    enforce: 'pre',
+    resolveId(id, importer) {
+      if (isForbidden(id)) throw new BoundaryViolation(id, importer);
+      return null;
+    },
+    load(id) {
+      if (isForbidden(id)) throw new BoundaryViolation(id);
+      return null;
+    },
+  };
 }
