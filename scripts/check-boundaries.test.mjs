@@ -1,4 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -251,6 +253,49 @@ describe('check-boundaries, whole package (subpaths.json + exports)', () => {
       { kind: 'bundles root-owned source', path: 'pkg-hoisted-root-violation/src/root-only.ts', from: 'pkg-hoisted-root-violation/out/chunk.js' },
     ]);
     expect(byEntry['pkg-hoisted-root-violation/src/views/index.ts']).toEqual([]);
+  });
+
+  // i2mint/polytag#26: the guarded test run reads each tag-agnostic subpath's `tests`.
+  const LISTING_ERRORS = [
+    'subpaths.json lists tests/listed-imports-groups.test.ts as tag-agnostic, but it reaches tag-aware code',
+    'tests/unlisted-by-name.test.ts tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)',
+    'tests/unlisted.test.ts tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)',
+    'subpaths.json lists tests/wrongly-listed.test.ts as tag-agnostic, but it reaches tag-aware code',
+  ];
+
+  it('fails a tag-agnostic test nobody lists, and a listed test that reaches tag-aware code; ignores the rest', async () => {
+    const { errors } = await checkFixturePackage('pkg-tests-listing');
+    expect(errors).toEqual(LISTING_ERRORS);
+    // Not flagged: views.test.ts (listed); root.test.ts, self-import.test.ts (the package by its
+    // own name), built-root.test.ts (the root's built file), uses-groups.test.ts (all tag-aware,
+    // unlisted); no-sources.test.ts (reaches no source); tests/agnostic/ (always guarded).
+  });
+
+  // esbuild reports inputs relative to the REAL working dir; compared as real paths.
+  it.each([
+    ['a symlinked package path', true, false],
+    ['a symlinked working dir', false, true],
+    ['both symlinked', true, true],
+  ])('gives the same answers through %s', async (_, linkPackage, linkWorkingDir) => {
+    const dir = mkdtempSync(join(tmpdir(), 'polytag-link-'));
+    try {
+      const wd = linkWorkingDir ? join(dir, 'fixtures') : fixtures;
+      if (linkWorkingDir) symlinkSync(fixtures, wd, 'dir');
+      const pkgPath = (name) => {
+        if (!linkPackage) return join(wd, name);
+        const link = join(dir, `link-${name}`);
+        symlinkSync(join(fixtures, name), link, 'dir');
+        return link;
+      };
+      const options = { absWorkingDir: wd, nodePaths: [join(fixtures, 'modules')] };
+      expect((await checkPackage(pkgPath('pkg-tests-listing'), options)).errors).toEqual(LISTING_ERRORS);
+      // The code pass too: a built file's groups import and its literal mention survive the links.
+      const { results } = await checkPackage(pkgPath('pkg-built-violation'), options);
+      const kinds = results.flatMap((r) => r.violations.map((v) => v.kind));
+      expect(kinds).toEqual(expect.arrayContaining(['imports', 'mentions']));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('fails a tag-agnostic subpath export without a types file', async () => {

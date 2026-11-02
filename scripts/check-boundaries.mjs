@@ -32,6 +32,9 @@
  *    declarations (tsup can hoist shared types into `index.d.ts`); a dependency that
  *    declares a forbidden package.
  *
+ * 3. Tests: every test of only tag-agnostic code is listed in its subpath's `tests` in
+ *    `subpaths.json`, which the runtime-guarded test run reads (see unlistedTestErrors).
+ *
  * Built files must exist (`pnpm build` first); anything that cannot be resolved or read
  * fails the check.
  *
@@ -43,7 +46,7 @@
  */
 
 import { build } from 'esbuild';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -250,6 +253,35 @@ function scanOwnFile(file) {
 }
 
 /**
+ * The import graph of `entry` (an esbuild metafile; nothing written). Every import a runtime
+ * would execute is followed, even ones a bundler may drop because the package says
+ * `sideEffects: false` (a code-split entry bare-imports the chunks it needs for evaluation
+ * order): fail closed, and no "ignoring this import" warning. `external` keeps bare imports
+ * unbundled, to be judged by name.
+ */
+function bundleGraph(entry, { absWorkingDir, nodePaths, external = false }) {
+  return build({
+    entryPoints: [entry],
+    absWorkingDir,
+    nodePaths,
+    bundle: true,
+    write: false,
+    metafile: true,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+    ignoreAnnotations: true,
+    ...(external ? { packages: 'external' } : {}),
+  });
+}
+
+/** Is `file` (a real path) one of the package's own files, outside `node_modules` and, unless allowed, `tests/`? */
+const isOwnFile = (packageDir, { tests = false } = {}) => (file) => {
+  const r = toPosix(relative(packageDir, file));
+  return !r.startsWith('..') && !r.includes('node_modules/') && (tests || !r.startsWith('tests/'));
+};
+
+/**
  * Code pass: bundle each entry (source or built JS) and return what it reaches.
  *
  * @param {object} options
@@ -264,9 +296,11 @@ export async function checkSources({
   entries,
   forbidden = DEFAULT_FORBIDDEN,
   forbiddenFiles = [],
-  absWorkingDir = ROOT,
+  absWorkingDir: workingDir = ROOT,
   nodePaths = [],
 }) {
+  // esbuild reports inputs relative to the REAL working dir: resolve against the same one.
+  const absWorkingDir = realpathOr(workingDir);
   const isForbidden = makeIsForbidden(forbidden);
   const rel = (f) => toPosix(relative(absWorkingDir, f));
   const forbiddenSet = new Set(forbiddenFiles.map((f) => resolve(absWorkingDir, f)));
@@ -274,21 +308,7 @@ export async function checkSources({
   for (const entry of entries) {
     const entryAbs = resolve(absWorkingDir, entry);
     const owner = nearestPackageJson(entryAbs);
-    const { metafile, warnings } = await build({
-      entryPoints: [entryAbs],
-      absWorkingDir,
-      nodePaths,
-      bundle: true,
-      write: false,
-      metafile: true,
-      platform: 'node',
-      format: 'esm',
-      logLevel: 'silent',
-      // Follow every import a runtime would execute, even ones a bundler may drop because the
-      // package says `sideEffects: false` (a code-split entry bare-imports the chunks it needs
-      // for evaluation order): fail closed, and no "ignoring this import" warning.
-      ignoreAnnotations: true,
-    });
+    const { metafile, warnings } = await bundleGraph(entryAbs, { absWorkingDir, nodePaths });
     const violations = warnings.map((w) => ({
       kind: 'esbuild warning',
       path: w.text,
@@ -368,9 +388,11 @@ export function checkDeclarations({
   entries,
   forbidden = DEFAULT_FORBIDDEN,
   forbiddenFiles = [],
-  absWorkingDir = ROOT,
+  absWorkingDir: workingDir = ROOT,
   compilerOptions = {},
 }) {
+  // esbuild reports inputs relative to the REAL working dir: resolve against the same one.
+  const absWorkingDir = realpathOr(workingDir);
   const isForbidden = makeIsForbidden(forbidden);
   const forbiddenSet = new Set(forbiddenFiles.map((f) => realpathOr(resolve(absWorkingDir, f))));
   const rel = (f) => toPosix(relative(absWorkingDir, f));
@@ -457,7 +479,12 @@ function conditionsWithoutTypes(target, path = []) {
  * @param {object} [options]  `absWorkingDir`, `nodePaths`, `compilerOptions`, `forbidden` (see the passes).
  * @returns {Promise<{errors: string[], results: {entry: string, violations: object[]}[]}>}
  */
-export async function checkPackage(packageDir, { absWorkingDir = ROOT, nodePaths = [], compilerOptions, forbidden } = {}) {
+export async function checkPackage(dir, { absWorkingDir: workingDir = ROOT, nodePaths = [], compilerOptions, forbidden } = {}) {
+  // esbuild reports inputs relative to the real working dir, and they are compared as real
+  // paths: a symlinked package or working dir (macOS /tmp) would otherwise make every input
+  // look foreign, and the checks that compare against the package would pass vacuously.
+  const packageDir = realpathOr(dir);
+  const absWorkingDir = realpathOr(workingDir);
   const errors = [];
   const pkg = readJson(join(packageDir, 'package.json'));
   const subpathsFile = join(packageDir, 'subpaths.json');
@@ -504,6 +531,11 @@ export async function checkPackage(packageDir, { absWorkingDir = ROOT, nodePaths
     sourceResults.flatMap((r) => r.reached),
     { absWorkingDir, nodePaths, packageDir },
   );
+  // Tag-aware: root-only sources, plus the tag-aware subpaths' own sources and built files.
+  const tagAwareFiles = new Set([...rootOnly, ...forbiddenFiles.filter(isFile).map((f) => realpathSync(f))]);
+  errors.push(
+    ...(await unlistedTestErrors(packageDir, subpaths, tagAwareFiles, { absWorkingDir, nodePaths, forbidden, packageName: pkg.name, tagAwareSubpaths: aware })),
+  );
   const rel = (f) => toPosix(relative(absWorkingDir, f));
   const results = [
     ...sourceResults.map(({ entry, violations, reached }) => ({ entry, violations: [...violations, ...hoistedRootSources(reached, rootOnly, rel)] })),
@@ -513,16 +545,55 @@ export async function checkPackage(packageDir, { absWorkingDir = ROOT, nodePaths
 }
 
 /**
+ * The guarded test run (`vitest.agnostic.config.ts`) covers each tag-agnostic subpath's
+ * `tests` in `subpaths.json`; this keeps that list honest (i2mint/polytag#26). A test file
+ * under `tests/` (not `tests/agnostic/`, which the guarded run always includes) is
+ * tag-agnostic when its static imports reach at least one of the package's own source files
+ * (or a tag-agnostic subpath by the package's name), nothing tag-aware (a root-only source,
+ * a tag-aware subpath's files or name) and no forbidden module. Errors: a tag-agnostic test nobody lists
+ * (it would run unguarded), and a listed test that reaches tag-aware code.
+ */
+async function unlistedTestErrors(packageDir, subpaths, tagAwareFiles, { absWorkingDir, nodePaths, forbidden = DEFAULT_FORBIDDEN, packageName, tagAwareSubpaths = [] }) {
+  const testsDir = join(packageDir, 'tests');
+  if (!existsSync(testsDir)) return [];
+  const isForbidden = makeIsForbidden(forbidden);
+  // The package imported by its own name: its tag-aware subpaths (`polytag`, not `polytag/formats`).
+  const selfName = (k) => (k === '.' ? packageName : `${packageName}${k.slice(1)}`);
+  const selfAware = new Set(tagAwareSubpaths.map(selfName));
+  const selfAgnostic = new Set(Object.keys(subpaths).filter((k) => !subpaths[k].tagAware).map(selfName));
+  const isTagAwareImport = (spec) => isForbidden(spec) || selfAware.has(spec);
+  const listed = new Set(Object.values(subpaths).filter((s) => !s.tagAware).flatMap((s) => s.tests ?? []));
+  const own = isOwnFile(packageDir);
+  const tests = readdirSync(testsDir, { recursive: true })
+    .map((f) => toPosix(join('tests', String(f))))
+    .filter((f) => /\.test\.[cm]?[jt]sx?$/.test(f) && !f.startsWith('tests/agnostic/'))
+    .sort();
+  const errors = [];
+  for (const test of tests) {
+    const { metafile } = await bundleGraph(join(packageDir, test), { absWorkingDir, nodePaths, external: true });
+    const reached = Object.keys(metafile.inputs).map((path) => realpathOr(resolve(absWorkingDir, path))).filter(own);
+    const externals = Object.values(metafile.inputs).flatMap((input) => input.imports.filter((i) => i.external).map((i) => i.path));
+    const tagAware = reached.some((f) => tagAwareFiles.has(f)) || externals.some(isTagAwareImport);
+    if (listed.has(test) && tagAware) errors.push(`subpaths.json lists ${test} as tag-agnostic, but it reaches tag-aware code`);
+    const testsAgnosticCode = reached.length > 0 || externals.some((spec) => selfAgnostic.has(spec)); // `polytag/views` by name
+    if (!listed.has(test) && !tagAware && testsAgnosticCode) {
+      errors.push(`${test} tests only tag-agnostic code, but no tag-agnostic subpath lists it in subpaths.json "tests" (the guarded run would skip it)`);
+    }
+  }
+  return errors;
+}
+
+/**
  * The package's own source files that only the tag-aware root reaches: bundled from the
  * root's sources, minus everything a tag-agnostic entry's sources reach.
  */
 async function rootOwnedSources(rootSources, agnosticReached, { absWorkingDir, nodePaths, packageDir }) {
   if (!rootSources.length) return new Set();
   const agnostic = new Set(agnosticReached.map((f) => realpathOr(f)));
-  const own = (f) => !toPosix(relative(packageDir, f)).startsWith('..') && !toPosix(f).includes('/node_modules/');
+  const own = isOwnFile(packageDir, { tests: true });
   const out = new Set();
   for (const entry of rootSources) {
-    const { metafile } = await build({ entryPoints: [entry], absWorkingDir, nodePaths, bundle: true, write: false, metafile: true, platform: 'node', format: 'esm', logLevel: 'silent', ignoreAnnotations: true });
+    const { metafile } = await bundleGraph(entry, { absWorkingDir, nodePaths });
     for (const path of Object.keys(metafile.inputs)) {
       const abs = realpathOr(resolve(absWorkingDir, path));
       if (isFile(abs) && own(abs) && !agnostic.has(abs) && !/\.(c|m)?js$/.test(abs)) out.add(abs);
