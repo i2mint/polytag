@@ -17,9 +17,12 @@
  *    `import './chunk.js'` is followed). Violations: a bundled file or import specifier
  *    matching a forbidden pattern; reaching the tag-aware root (its source or built
  *    files); any esbuild warning; in the package's own files, a string literal naming a
- *    forbidden package (catches type-only imports and `createRequire`) or an
- *    `import()`/`require()` whose argument is not a string literal (unless the line, or
- *    the one above, says `boundary-check: allow-dynamic`); in a dependency, a forbidden
+ *    forbidden package (catches type-only imports), an `import()`/`require()` whose
+ *    argument is not a string literal, or any other runtime loader esbuild cannot follow
+ *    (`require` aliased or not in call position, `module.require`, `createRequire`, `eval`,
+ *    `Function`, a computed member of `globalThis`/`global`/`self`/`window`), unless the line, or the one above, says
+ *    `boundary-check: allow-dynamic` in a comment. The threat model is accidental coupling
+ *    (see ESCAPE_NAMES). In a dependency, a forbidden
  *    package among its dependencies, peerDependencies or optionalDependencies.
  *    Also: a built file reached from a tag-agnostic entry whose source map lists a source file
  *    only the tag-aware root reaches (root code hoisted into a shared chunk).
@@ -88,26 +91,162 @@ function dependencyViolations(packageJsonPath, isForbidden, rel) {
     .map((dep) => ({ kind: 'dependency declares', path: dep, from: pkg.name ?? rel(packageJsonPath) }));
 }
 
-/** String literals and non-literal import()/require() calls in one of the package's own files. */
+/**
+ * Runtime loaders esbuild cannot follow, as written by accident or by a well-meaning
+ * workaround: `require` aliased or not in call position (`const r = require`,
+ * `require.call`), `module.require`, `createRequire`, `eval`, `new Function`, a computed
+ * member of a global object (`globalThis['req' + 'uire']`).
+ *
+ * Threat model: accidental coupling, not an adversary. A determined author can always reach
+ * a module at runtime (`Module._load`, `''.constructor.constructor`, `vm`...), and no
+ * deny-list closes that; the real guarantee is extracting the tag-agnostic code into a
+ * package that does not depend on `@zodal/groups-*` (ADR 0001). Names are judged as free
+ * references, so a local `window` parameter or `const self = this` is not a global.
+ */
+export const ESCAPE_NAMES = new Set(['require', 'createRequire', 'eval', 'Function']);
+
+/** Global objects whose computed members (`globalThis[name]`) can reach an escape. */
+export const GLOBAL_OBJECTS = new Set(['globalThis', 'global', 'self', 'window']);
+
+/** Members of an escape name that invoke it (`require.call(null, n)`). */
+const CALLING_MEMBERS = new Set(['call', 'apply', 'bind', 'constructor']);
+
+/** Operators whose operands are only compared, never run. */
+const COMPARISONS = new Set([
+  ts.SyntaxKind.InstanceOfKeyword,
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+]);
+
+/**
+ * Is `node` inside esbuild's `var __require = ...` shim, which a built ESM file carries when
+ * its source calls `require('literal')`? The source itself is scanned, so the shim adds nothing.
+ */
+function isInEsbuildRequireShim(node) {
+  for (let n = node.parent; n; n = n.parent) {
+    if (ts.isVariableDeclaration(n)) return ts.isIdentifier(n.name) && n.name.text === '__require';
+  }
+  return false;
+}
+
+/** `node` without the parentheses and type assertions around it: `(globalThis as any)` -> `globalThis`. */
+function unwrap(node) {
+  let n = node;
+  while (
+    ts.isParenthesizedExpression(n) ||
+    ts.isAsExpression(n) ||
+    ts.isTypeAssertionExpression(n) ||
+    ts.isNonNullExpression(n) ||
+    ts.isSatisfiesExpression(n)
+  ) {
+    n = n.expression;
+  }
+  return n;
+}
+
+/** Is `node` inside a type (`f: Function`, `typeof eval` in a type), where it never runs? */
+function isInType(node) {
+  for (let n = node.parent; n; n = n.parent) {
+    if (ts.isTypeNode(n) && !ts.isExpressionWithTypeArguments(n)) return true;
+    if (ts.isStatement(n) || ts.isSourceFile(n)) return false;
+  }
+  return false;
+}
+
+/**
+ * Why `node` is a runtime loader esbuild cannot follow, or undefined. `isFree(id)` says
+ * whether an identifier names nothing declared in the file (a global).
+ */
+function escapeKind(node, isFree) {
+  if (ts.isCallExpression(node)) {
+    const callee = node.expression;
+    const [arg] = node.arguments;
+    const loader = callee.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(callee) && callee.text === 'require');
+    return loader && (!arg || !ts.isStringLiteralLike(arg)) ? 'non-literal import' : undefined;
+  }
+  if (ts.isImportSpecifier(node) || ts.isBindingElement(node)) {
+    // `import { createRequire }`, `const { createRequire, require: r } = m`.
+    const name = node.propertyName ?? node.name;
+    return ts.isIdentifier(name) && (name.text === 'createRequire' || (ts.isBindingElement(node) && name.text === 'require'))
+      ? 'runtime loader'
+      : undefined;
+  }
+  if (ts.isPropertyAccessExpression(node)) {
+    // `module.require`, `m.createRequire`, and `globalThis.eval` (any escape on a global object).
+    const { text } = node.name;
+    const target = unwrap(node.expression);
+    const onGlobal = ts.isIdentifier(target) && GLOBAL_OBJECTS.has(target.text) && isFree(target);
+    return text === 'require' || text === 'createRequire' || (onGlobal && ESCAPE_NAMES.has(text)) ? 'runtime loader' : undefined;
+  }
+  if (ts.isElementAccessExpression(node)) {
+    const key = node.argumentExpression;
+    if (ts.isStringLiteralLike(key)) return ESCAPE_NAMES.has(key.text) ? 'runtime loader' : undefined;
+    const target = unwrap(node.expression);
+    return ts.isIdentifier(target) && GLOBAL_OBJECTS.has(target.text) && isFree(target) ? 'computed global member' : undefined;
+  }
+  if (!ts.isIdentifier(node) || isInType(node)) return undefined;
+  const { parent } = node;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === node) return undefined; // judged above
+  if (!isFree(node)) return undefined;
+  if (ESCAPE_NAMES.has(node.text)) {
+    if (node.text === 'require' && ts.isCallExpression(parent) && parent.expression === node) return undefined; // judged above
+    if (ts.isTypeOfExpression(parent)) return undefined; // `typeof require !== 'undefined'`
+    // `Function.prototype.toString`, `require.resolve`: reading a member is not loading; `.call`/`.apply`/`.bind`/`.constructor` can be.
+    if (ts.isPropertyAccessExpression(parent) && parent.expression === node && !CALLING_MEMBERS.has(parent.name.text)) return undefined;
+    if (ts.isBinaryExpression(parent) && COMPARISONS.has(parent.operatorToken.kind)) return undefined; // `x instanceof Function`
+    if (isInEsbuildRequireShim(node)) return undefined;
+    return 'runtime loader';
+  }
+  return undefined;
+}
+
+/** Lines (0-based) holding, or directly below, a comment that carries ALLOW_DYNAMIC_MARKER. */
+function allowedLines(source) {
+  const text = source.getFullText();
+  const lines = new Set();
+  const seen = new Set();
+  const mark = (ranges = []) => {
+    for (const { pos, end } of ranges) {
+      if (seen.has(pos) || !text.slice(pos, end).includes(ALLOW_DYNAMIC_MARKER)) continue;
+      seen.add(pos);
+      const line = source.getLineAndCharacterOfPosition(end).line;
+      lines.add(line).add(line + 1);
+    }
+  };
+  const visit = (node) => {
+    mark(ts.getLeadingCommentRanges(text, node.pos));
+    mark(ts.getTrailingCommentRanges(text, node.end));
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return lines;
+}
+
+/**
+ * String literals, and runtime loaders esbuild cannot follow, in one of the package's own
+ * files. A loader is allowed when a comment on its line, or on the line above, carries
+ * ALLOW_DYNAMIC_MARKER (a string that contains it does not count).
+ */
 function scanOwnFile(file) {
-  const text = readFileSync(file, 'utf8');
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false);
-  const lines = text.split('\n');
+  // A one-file program with no lib: a name that resolves to nothing is a global.
+  // A JSON (or other non-script) input is not a program root: scan its literals only.
+  const script = /\.[cm]?[jt]sx?$/.test(file);
+  const program = script && ts.createProgram([file], { noLib: true, noResolve: true, allowJs: true, types: [], noEmit: true });
+  const source = program ? program.getSourceFile(file) : ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);
+  const checker = program && program.getTypeChecker();
+  // Free: declared nowhere in this file (`globalThis` resolves to a built-in symbol with no declaration).
+  const isFree = (id) => !(checker.getSymbolAtLocation(id)?.declarations ?? []).some((d) => d.getSourceFile() === source);
+  const allowed = allowedLines(source);
   const literals = [];
   const dynamicCalls = [];
-  const isLoader = (callee) =>
-    callee.kind === ts.SyntaxKind.ImportKeyword ||
-    (ts.isIdentifier(callee) && callee.text === 'require') ||
-    (ts.isCallExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === 'createRequire');
   const visit = (node) => {
     if (ts.isStringLiteralLike(node)) literals.push(node.text);
-    if (ts.isCallExpression(node) && isLoader(node.expression)) {
-      const [arg] = node.arguments;
-      if (!arg || !ts.isStringLiteralLike(arg)) {
-        const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line;
-        const allowed = [lines[line], lines[line - 1]].some((l) => l?.includes(ALLOW_DYNAMIC_MARKER));
-        if (!allowed) dynamicCalls.push({ line: line + 1, code: node.getText(source).slice(0, 80) });
-      }
+    const kind = checker && escapeKind(node, isFree);
+    if (kind) {
+      const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line;
+      if (!allowed.has(line)) dynamicCalls.push({ kind, line: line + 1, code: node.getText(source).slice(0, 80) });
     }
     ts.forEachChild(node, visit);
   };
@@ -178,8 +317,8 @@ export async function checkSources({
         for (const literal of literals.filter(isForbidden)) {
           violations.push({ kind: 'mentions', path: literal, from: path });
         }
-        for (const { line, code } of dynamicCalls) {
-          violations.push({ kind: 'non-literal import', path: code, from: `${path}:${line}` });
+        for (const { kind, line, code } of dynamicCalls) {
+          violations.push({ kind, path: code, from: `${path}:${line}` });
         }
       } else if (pkgJson && !checkedPackages.has(pkgJson)) {
         checkedPackages.add(pkgJson);

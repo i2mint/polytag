@@ -21,7 +21,7 @@
 | `apps/playground` | private Vite + TS app (vanilla), not published |
 | `scripts/check-boundaries.mjs` | boundary check: tag-agnostic sources, built JS and `.d.ts` never reach `@zodal/groups-*` or the root; tests + fixtures beside it |
 | `skills/polytag/SKILL.md` | the shipped **usage** skill (i2mint/polytag#6); its tables are generated: after changing a format, grammar or the `@zodal/groups-core` dev version, run `pnpm build && node scripts/gen-skill-tables.mjs` (`gen-skill-tables.test.mjs` fails on drift) |
-| `scripts/release-gate.mjs` | CI release decision: a `[publish]` subject since the last `v*` tag + an unpublished version |
+| `scripts/release-gate.mjs` | CI release decision: a subject ending in `[publish]` since the last released `v*` tag and the last version change + an unpublished version |
 
 Commands: `pnpm install && pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries`. A new subpath goes in `subpaths.json`, `package.json` `exports` (with `types` for every condition) and `typesVersions`, and `tests/exports.test.ts` `EXPECTED`; the boundary check fails if `subpaths.json` and `exports` disagree. A deliberate non-literal `import()` in tag-agnostic code needs a `boundary-check: allow-dynamic` comment.
 
@@ -41,5 +41,5 @@ Real files live in `skills/`; `.claude/skills/` is a symlink bridge.
 - polytag may depend on both `@zodal/store` and `@zodal/ui`; nothing upstream may depend on polytag.
 - A gap in zodal or zodal-groups is filed upstream, never worked around here.
 - Tag-agnostic subpaths never import `@zodal/groups-*`, directly or through `src/index.ts` (CI enforces it).
-- `@zodal/*` and `zod` are peers with a caret on the lowest version used (`../zodal/docs/versioning.md`), added by the first change that imports them. Publish only with `pnpm`, only via a `[publish]` commit subject plus a version bump, and only after an owner approves the `npm-publish` environment; commit `pnpm-lock.yaml` with every dependency change.
+- `@zodal/*` and `zod` are peers with a caret on the lowest version used (`../zodal/docs/versioning.md`), added by the first change that imports them. Publish only with `pnpm`, only via a commit subject ending in `[publish]` at or after the version bump, and only after an owner approves the `npm-publish` environment; commit `pnpm-lock.yaml` with every dependency change.
 - Public repo: no private project names, paths or data in code, docs, issues or commits.

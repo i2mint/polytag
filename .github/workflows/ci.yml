@@ -62,17 +62,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0 # the subjects since the last release tag
+          fetch-depth: 0 # the history back to the last release or version change
 
       - uses: actions/setup-node@v6
         with:
           node-version: 22
 
-      # Publish iff a commit SUBJECT since the last `v*` tag contains `[publish]` (bodies
-      # never count) AND a public package's version is not on the registry yet. Reading
-      # the whole range means a multi-commit push, or a cancelled release, is not lost;
-      # a marker without a version bump publishes nothing and says so in a notice.
-      # Subjects are read with git, never interpolated from the event payload.
+      # Publish iff a first-parent commit SUBJECT since the last released `v*` tag (one whose
+      # version is on the registry), and at or after the last change to a package's public
+      # identity (its version or private flag), ENDS with `[publish]` (bodies
+      # never count) AND that version is not on the registry yet. Inside that window a marker
+      # stays armed across pushes, so a cancelled release is not lost. Subjects are read with
+      # git, never interpolated from the event payload. Full rules: scripts/release-gate.mjs.
       - id: decide
         run: node scripts/release-gate.mjs
 
@@ -84,7 +85,9 @@ jobs:
     # Required reviewers on this environment (a repo setting) make every publish wait for
     # an owner's approval.
     environment: npm-publish
-    # Releases never overlap and a running one is never cancelled.
+    # Releases never overlap and a running one is never cancelled. A newer pending run does
+    # replace an older pending one, so two bumps pushed while one awaits approval publish
+    # only the newer version.
     concurrency:
       group: npm-publish-${{ github.repository }}
       cancel-in-progress: false

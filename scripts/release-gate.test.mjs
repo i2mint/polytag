@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { decideRelease, isPublished, publicPackages, subjectsSinceLastRelease } from './release-gate.mjs';
+import { decideRelease, hasMarker, isPublished, publicPackages, releaseWindowSubjects } from './release-gate.mjs';
 
 const unpublished = [{ name: 'polytag', version: '0.1.0', published: false }];
 const published = [{ name: 'polytag', version: '0.1.0', published: true }];
@@ -15,13 +15,27 @@ describe('decideRelease', () => {
 
   it('publishes when the marker is in ANY subject of the range, not only the head', () => {
     const d = decideRelease({ subjects: ['docs: later commit', 'feat: x [publish]'], packages: unpublished });
-    expect(d).toEqual({ publish: true, force: false, reason: 'publishing polytag@0.1.0' });
+    expect(d).toMatchObject({ publish: true, force: false, reason: 'publishing polytag@0.1.0' });
   });
 
   it('a marker with no unpublished version publishes nothing, and says why', () => {
     const d = decideRelease({ subjects: ['chore: release [publish]'], packages: published });
     expect(d.publish).toBe(false);
     expect(d.reason).toMatch(/nothing to publish: polytag@0\.1\.0 already on the registry/);
+  });
+
+  it('reports what is pending even when nothing arms it', () => {
+    const d = decideRelease({ subjects: ['feat: x'], packages: unpublished });
+    expect(d).toMatchObject({ publish: false, armed: false, pending: ['polytag@0.1.0'] });
+    expect(d.reason).toMatch(/polytag@0\.1\.0 not on the registry, but no subject/);
+  });
+
+  it('notices only when this push asked for a release that will not happen, or a version waits', () => {
+    const notice = (subjects, packages, headSubject) => decideRelease({ subjects, packages, headSubject }).notice;
+    expect(notice(['docs: x', 'feat: y [publish]'], published, 'docs: x')).toBe(false); // every push after a release
+    expect(notice(['chore: again [publish]'], published, 'chore: again [publish]')).toBe(true); // asked, nothing to publish
+    expect(notice(['feat: x'], unpublished, 'feat: x')).toBe(true); // a version waits for a marker
+    expect(notice(['feat: x [publish]'], unpublished, 'feat: x [publish]')).toBe(false); // publishing
   });
 
   it('[force publish] arms a release and sets force', () => {
@@ -32,29 +46,135 @@ describe('decideRelease', () => {
   });
 });
 
-describe('subjectsSinceLastRelease', () => {
+describe('hasMarker', () => {
+  it.each([
+    ['feat: x [publish]', true],
+    ['feat: x [publish] (#12)', true],
+    ['chore: release\t[publish]', true],
+    ['[publish]', true],
+    ['[publish] feat: x', false],
+    ['docs: explain the [publish] marker', false],
+    ['feat: x[publish]', false],
+    ['docs: [publish]ing', false],
+    ['feat: x [publish] (draft)', false],
+    ['feat: x', false],
+  ])('%j -> %s', (subject, expected) => {
+    expect(hasMarker(subject)).toBe(expected);
+  });
+
+  it('[force publish] is its own token, and does not contain [publish]', () => {
+    expect(hasMarker('x [force publish]', '[force publish]')).toBe(true);
+    expect(hasMarker('x [force publish]')).toBe(false);
+  });
+});
+
+describe('releaseWindowSubjects', () => {
   const repo = mkdtempSync(join(tmpdir(), 'polytag-gate-'));
   afterAll(() => rmSync(repo, { recursive: true, force: true }));
   const git = (...args) =>
-    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd: repo });
-  git('init', '-q');
-  git('commit', '-q', '--allow-empty', '-m', 'first');
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], {
+      cwd: repo,
+      encoding: 'utf8',
+    });
+  const manifest = (dir, fields) => {
+    mkdirSync(join(repo, 'packages', dir), { recursive: true });
+    writeFileSync(join(repo, 'packages', dir, 'package.json'), `${JSON.stringify({ name: dir, ...fields }, null, 2)}\n`);
+    git('add', '-A');
+  };
+  const commit = (...messages) => git('commit', '-q', '--allow-empty', ...messages.flatMap((m) => ['-m', m]));
+  const window = (options) => releaseWindowSubjects(repo, options);
+  const decide = async (version, options) =>
+    decideRelease({ subjects: await window(options), packages: [{ name: 'p', version, published: false }] });
+  git('init', '-q', '-b', 'main');
+  commit('first');
 
-  it('reads the whole history before any release tag', () => {
-    expect(subjectsSinceLastRelease(repo)).toEqual(['first']);
+  it('reads the whole first-parent history while nothing bounds it', async () => {
+    expect(await window()).toEqual(['first']);
   });
 
-  it('reads only the commits after the last v* tag (a cancelled release stays armed)', () => {
-    git('tag', '-a', 'v0.0.1', '-m', 'release');
-    git('commit', '-q', '--allow-empty', '-m', 'feat: x [publish]', '-m', 'body');
-    git('commit', '-q', '--allow-empty', '-m', 'docs: y');
-    expect(subjectsSinceLastRelease(repo)).toEqual(['docs: y', 'feat: x [publish]']);
+  it('starts at the commit that sets the version, inclusive', async () => {
+    manifest('p', { version: '0.1.0' });
+    commit('feat: scaffold [publish]');
+    commit('docs: later');
+    expect(await window()).toEqual(['docs: later', 'feat: scaffold [publish]']);
   });
 
-  it('never reads commit bodies', () => {
-    git('commit', '-q', '--allow-empty', '-m', 'docs: z', '-m', 'mentions [publish] in the body');
-    expect(subjectsSinceLastRelease(repo)).not.toContain('mentions [publish] in the body');
-    expect(decideRelease({ subjects: ['docs: z'], packages: unpublished }).publish).toBe(false);
+  it('a marker before the last bump does not arm it (#15 item 1)', async () => {
+    commit('chore: release [publish]');
+    manifest('p', { version: '0.2.0' });
+    commit('chore: bump to 0.2.0');
+    expect(await window()).toEqual(['chore: bump to 0.2.0']);
+    expect((await decide('0.2.0')).publish).toBe(false);
+  });
+
+  it('a subject that only mentions the marker does not arm a pending bump', async () => {
+    commit('docs: explain the [publish] marker in CONTRIBUTING');
+    expect((await decide('0.2.0')).publish).toBe(false);
+  });
+
+  it('a marker after the bump arms it, and stays armed across later pushes', async () => {
+    commit('chore: release 0.2.0 [publish] (#7)');
+    commit('fix: y');
+    expect(await decide('0.2.0')).toMatchObject({ publish: true, armed: true });
+  });
+
+  it('a released tag spends the marker: the window starts after it', async () => {
+    git('tag', '-a', 'v0.2.0', '-m', 'Release v0.2.0');
+    commit('docs: after the release');
+    expect(await window()).toEqual(['docs: after the release']);
+  });
+
+  it('reads the tag name right even when a branch shares it (refs/tags/v0.2.0 vs refs/heads/v0.2.0)', async () => {
+    git('branch', 'v0.2.0');
+    const seen = [];
+    await window({ isReleased: async (tag) => (seen.push(tag), true) });
+    git('branch', '-D', 'v0.2.0');
+    expect(seen).toEqual(['v0.2.0']);
+  });
+
+  it('a tag whose version is not on the registry does not bound the window', async () => {
+    const isReleased = async (tag) => tag !== 'v0.2.0';
+    expect((await window({ isReleased })).slice(0, 3)).toEqual(['docs: after the release', 'fix: y', 'chore: release 0.2.0 [publish] (#7)']);
+  });
+
+  it('a manifest edit that leaves the version alone (even rewriting its line) does not move the window', async () => {
+    commit('chore: x [publish]');
+    manifest('p', { version: '0.2.0', description: 'changed' }); // the version line gains a comma
+    commit('docs: describe p');
+    expect(await window()).toEqual(['docs: describe p', 'chore: x [publish]', 'docs: after the release']);
+  });
+
+  it('a package going public moves the window: an old marker cannot publish it (review finding 1)', async () => {
+    manifest('b', { version: '0.1.0', private: true });
+    commit('chore: add private b');
+    commit('chore: a [publish]');
+    manifest('b', { version: '0.1.0' });
+    commit('chore: make b public (not releasing yet)');
+    expect(await window()).toEqual(['chore: make b public (not releasing yet)']);
+  });
+
+  it('never reads commit bodies', async () => {
+    manifest('p', { version: '0.3.0', description: 'changed' });
+    commit('chore: bump to 0.3.0', 'mentions [publish] in the body');
+    expect(await window()).toEqual(['chore: bump to 0.3.0']);
+  });
+
+  it("never reads a merged branch's own subjects (--first-parent)", async () => {
+    git('switch', '-q', '-c', 'side');
+    commit('wip [publish]');
+    git('switch', '-q', 'main');
+    git('merge', '-q', '--no-ff', 'side', '-m', 'Merge branch side');
+    expect(await window()).toEqual(['Merge branch side', 'chore: bump to 0.3.0']);
+  });
+
+  it('a bump merged with a merge commit starts the window at the merge, and does not publish without a marker there', async () => {
+    git('switch', '-q', '-c', 'bump');
+    manifest('p', { version: '0.4.0', description: 'changed' });
+    commit('chore: bump to 0.4.0 [publish]');
+    git('switch', '-q', 'main');
+    git('merge', '-q', '--no-ff', 'bump', '-m', 'Merge pull request #9 from x/bump');
+    expect(await window()).toEqual(['Merge pull request #9 from x/bump']);
+    expect(await decide('0.4.0')).toMatchObject({ publish: false, armed: false, pending: ['p@0.4.0'] });
   });
 });
 
@@ -80,7 +200,9 @@ describe('isPublished', () => {
 });
 
 describe('publicPackages', () => {
-  it('lists the non-private packages of this repo', () => {
-    expect(publicPackages().map((p) => p.name)).toEqual(['polytag']);
+  it('lists the non-private packages of this repo, with their manifests', () => {
+    expect(publicPackages().map(({ name, manifest }) => ({ name, manifest }))).toEqual([
+      { name: 'polytag', manifest: join('packages', 'polytag', 'package.json') },
+    ]);
   });
 });
