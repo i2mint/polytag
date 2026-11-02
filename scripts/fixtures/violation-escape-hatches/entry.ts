@@ -11,3 +11,4 @@ export const viaIndirectEval = () => (0, eval)('require')(name);
 export const viaGlobal = () => (globalThis as any)['req' + 'uire'](name);
 export const viaLiteralKey = () => (globalThis as any)['require'](name);
 export const viaAlias = () => { const g = globalThis as any; return g['req' + 'uire'](name); };
+export const viaDestructure = (m: any) => { const { createRequire: cr } = m; return cr(import.meta.url)(name); };

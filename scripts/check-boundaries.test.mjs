@@ -64,38 +64,45 @@ describe('check-boundaries, runtime pass (esbuild metafile)', () => {
     ]);
   });
 
-  it('fails a createRequire() call esbuild cannot follow (string-literal scan + runtime loader)', async () => {
+  it('fails a createRequire() call esbuild cannot follow (string-literal scan + its import)', async () => {
     expect(await sources('violation-create-require')).toEqual([
       { kind: 'mentions', path: '@zodal/groups-core', from: 'violation-create-require/entry.ts' },
       { kind: 'runtime loader', path: 'createRequire', from: 'violation-create-require/entry.ts:1' },
-      { kind: 'runtime loader', path: 'createRequire', from: 'violation-create-require/entry.ts:3' },
     ]);
   });
 
   // i2mint/polytag#15 item 2: loaders that name no forbidden string and call no literal-less
-  // require()/import(), so only a scan for the loader itself sees them. One per fixture line.
+  // require()/import(), so only a scan for the loader itself sees them. Line 5 uses the
+  // createRequire imported on line 2, which is where it is flagged.
   it.each([
-    [5, 'runtime loader', 'createRequire(import.meta.url)'],
-    [6, 'runtime loader', 'const r = require'],
-    [7, 'runtime loader', 'require.call(null, name)'],
-    [8, 'runtime loader', 'module.require(name)'],
-    [9, 'runtime loader', "new Function('n', ...)"],
-    [10, 'runtime loader', "(0, eval)('require')"],
-    [11, 'computed global member', "globalThis['req' + 'uire']"],
-    [12, 'runtime loader', "globalThis['require']"],
-    [13, 'global object alias', 'const g = globalThis'],
-  ])('fails line %i: %s (%s)', async (line, kind) => {
+    [2, 'runtime loader', 'createRequire'],
+    [6, 'runtime loader', 'require'],
+    [7, 'runtime loader', 'require'],
+    [8, 'runtime loader', 'module.require'],
+    [9, 'runtime loader', 'Function'],
+    [10, 'runtime loader', 'eval'],
+    [11, 'computed global member', "(globalThis as any)['req' + 'uire']"],
+    [12, 'runtime loader', "(globalThis as any)['require']"],
+    [13, 'global object alias', 'globalThis'],
+    [14, 'runtime loader', 'createRequire: cr'],
+  ])('fails line %i: %s `%s`', async (line, kind, code) => {
     const violations = await sources('violation-escape-hatches');
-    expect(violations.filter((v) => v.from === `violation-escape-hatches/entry.ts:${line}`).map((v) => v.kind)).toContain(kind);
+    expect(violations).toContainEqual({ kind, path: code, from: `violation-escape-hatches/entry.ts:${line}` });
   });
 
-  it('flags nothing else in the escape-hatch fixture (one violation per line, the import on line 2)', async () => {
+  it('flags no other line of the escape-hatch fixture', async () => {
     const lines = (await sources('violation-escape-hatches')).map((v) => Number(v.from.split(':')[1]));
-    expect(lines).toEqual([2, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect([...new Set(lines)]).toEqual([2, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   });
 
-  it('does not flag look-alikes: member names, types, typeof, named global members, a marked escape', async () => {
+  it('does not flag look-alikes: member names, types, typeof, named global members, locals named like globals, a marked escape', async () => {
     expect(await sources('clean-escape-lookalikes')).toEqual([]);
+  });
+
+  it('honours the allow marker only in a comment, not in a string on the same line', async () => {
+    expect(await sources('violation-marker-in-string')).toEqual([
+      { kind: 'non-literal import', path: 'require(n)', from: 'violation-marker-in-string/entry.ts:1' },
+    ]);
   });
 
   it('does not flag a forbidden name in a comment', async () => {

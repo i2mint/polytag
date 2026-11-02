@@ -62,17 +62,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0 # the history back to the last version change
+          fetch-depth: 0 # the history back to the last release or version change
 
       - uses: actions/setup-node@v6
         with:
           node-version: 22
 
-      # Publish iff a first-parent commit SUBJECT at or after the last commit that changed a
-      # public package's version carries the token `[publish]` (bodies never count) AND that
-      # version is not on the registry yet. A marker before the bump never arms it; a marker
-      # after it stays armed across pushes, so a cancelled release is not lost. Subjects are
-      # read with git, never interpolated from the event payload.
+      # Publish iff a first-parent commit SUBJECT since the last released `v*` tag, and at or
+      # after the last change to a public package's version, ENDS with `[publish]` (bodies
+      # never count) AND that version is not on the registry yet. Inside that window a marker
+      # stays armed across pushes, so a cancelled release is not lost. Subjects are read with
+      # git, never interpolated from the event payload. Full rules: scripts/release-gate.mjs.
       - id: decide
         run: node scripts/release-gate.mjs
 

@@ -10,3 +10,10 @@ export const allowed = () => new Function('return 1');
 export const hasWindow = typeof window !== 'undefined';
 export const fetcher = globalThis.fetch;
 export const named = (o: { self: unknown }) => o.self;
+// Locals that share a global's name (review finding 4).
+export function rolling(xs: number[], window: number) { return xs.slice(-window); }
+export const pick = ({ window }: { window: number }) => window;
+export class Box { me() { const self = this; return self; } }
+export const unpack = (o: { global: number }) => { const { global } = o; return global; };
+export const isFn = (x: unknown) => x instanceof Function;
+export const run = (expr: { eval(): number }) => expr.eval();
