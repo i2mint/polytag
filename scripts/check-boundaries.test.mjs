@@ -64,10 +64,38 @@ describe('check-boundaries, runtime pass (esbuild metafile)', () => {
     ]);
   });
 
-  it('fails a createRequire() call esbuild cannot follow (string-literal scan)', async () => {
+  it('fails a createRequire() call esbuild cannot follow (string-literal scan + runtime loader)', async () => {
     expect(await sources('violation-create-require')).toEqual([
       { kind: 'mentions', path: '@zodal/groups-core', from: 'violation-create-require/entry.ts' },
+      { kind: 'runtime loader', path: 'createRequire', from: 'violation-create-require/entry.ts:1' },
+      { kind: 'runtime loader', path: 'createRequire', from: 'violation-create-require/entry.ts:3' },
     ]);
+  });
+
+  // i2mint/polytag#15 item 2: loaders that name no forbidden string and call no literal-less
+  // require()/import(), so only a scan for the loader itself sees them. One per fixture line.
+  it.each([
+    [5, 'runtime loader', 'createRequire(import.meta.url)'],
+    [6, 'runtime loader', 'const r = require'],
+    [7, 'runtime loader', 'require.call(null, name)'],
+    [8, 'runtime loader', 'module.require(name)'],
+    [9, 'runtime loader', "new Function('n', ...)"],
+    [10, 'runtime loader', "(0, eval)('require')"],
+    [11, 'computed global member', "globalThis['req' + 'uire']"],
+    [12, 'runtime loader', "globalThis['require']"],
+    [13, 'global object alias', 'const g = globalThis'],
+  ])('fails line %i: %s (%s)', async (line, kind) => {
+    const violations = await sources('violation-escape-hatches');
+    expect(violations.filter((v) => v.from === `violation-escape-hatches/entry.ts:${line}`).map((v) => v.kind)).toContain(kind);
+  });
+
+  it('flags nothing else in the escape-hatch fixture (one violation per line, the import on line 2)', async () => {
+    const lines = (await sources('violation-escape-hatches')).map((v) => Number(v.from.split(':')[1]));
+    expect(lines).toEqual([2, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  });
+
+  it('does not flag look-alikes: member names, types, typeof, named global members, a marked escape', async () => {
+    expect(await sources('clean-escape-lookalikes')).toEqual([]);
   });
 
   it('does not flag a forbidden name in a comment', async () => {
