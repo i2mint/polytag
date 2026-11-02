@@ -48,16 +48,12 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import ts from 'typescript';
+import { DEFAULT_FORBIDDEN, makeIsForbidden } from './boundary-patterns.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PACKAGE_DIR = join(ROOT, 'packages', 'polytag');
 
-/**
- * What a tag-agnostic subpath must not reach: the `@zodal/groups-*` packages, whether
- * through node_modules (`@zodal/groups-core`, pnpm's `.pnpm/@zodal+groups-core@x`) or a
- * local checkout of the zodal-groups repo (`../zodal-groups/...`).
- */
-export const DEFAULT_FORBIDDEN = [/@zodal[\\/+]groups-/, /(^|[\\/])zodal-groups([\\/]|$)/];
+export { DEFAULT_FORBIDDEN };
 
 /** Marks a deliberate non-literal `import()`/`require()` in tag-agnostic code. */
 export const ALLOW_DYNAMIC_MARKER = 'boundary-check: allow-dynamic';
@@ -65,7 +61,6 @@ export const ALLOW_DYNAMIC_MARKER = 'boundary-check: allow-dynamic';
 const toPosix = (p) => p.split('\\').join('/');
 const isFile = (p) => existsSync(p) && statSync(p).isFile();
 const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
-const makeIsForbidden = (forbidden) => (p) => forbidden.some((re) => re.test(toPosix(p)));
 
 /** The nearest `package.json` at or above `file`'s directory (memoised). */
 const nearestPackageJson = (() => {

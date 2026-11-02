@@ -1,6 +1,6 @@
 {
   ".": { "source": "src/index.ts", "tagAware": true },
-  "./formats": { "source": "src/formats/index.ts" },
-  "./backends": { "source": "src/backends/index.ts" },
-  "./views": { "source": "src/views/index.ts" }
+  "./formats": { "source": "src/formats/index.ts", "tests": ["tests/formats.test.ts"] },
+  "./backends": { "source": "src/backends/index.ts", "tests": ["tests/backends.test.ts", "tests/registry.test.ts"] },
+  "./views": { "source": "src/views/index.ts", "tests": ["tests/views.test.ts", "tests/registry.test.ts"] }
 }
