@@ -143,39 +143,17 @@ jobs:
       # from an exit code. A brand-new package name can 404 for minutes after a successful
       # publish, so retry before concluding it failed.
       - name: Verify the registry serves this version
-        run: |
-          set -euo pipefail
-          # The same list of public packages the release gate decided on.
-          SPECS=$(node scripts/release-gate.mjs --list)
-          # Fail closed: an empty list would verify nothing and pass.
-          [ -n "$SPECS" ] || { echo "::error::no public package to verify"; exit 1; }
-          for spec in $SPECS; do
-            version="${spec##*@}"
-            confirmed=""
-            for attempt in $(seq 1 20); do
-              got=$(npm view "$spec" version 2>/dev/null || true)
-              if [ "$got" = "$version" ]; then
-                echo "$spec confirmed on the registry (attempt ${attempt})"
-                confirmed=1
-                break
-              fi
-              echo "$spec not visible yet (attempt ${attempt}/20)"
-              sleep 15
-            done
-            if [ -z "$confirmed" ]; then
-              echo "::error::$spec never appeared on the registry -- the publish failed."
-              exit 1
-            fi
-          done
+        # Polls the registry for every public package (what the gate decided on); a 404 is
+        # "not visible yet", a registry error is retried and named. Fails on an empty list.
+        run: node scripts/release-gate.mjs --verify
 
       - name: Tag release
-        # The tag is derived from packages/polytag, the one published package. Pushed with
-        # the job's GITHUB_TOKEN (persisted by actions/checkout). A failed push fails the
-        # job: a version on npm without its tag must not look green.
+        # The tag is v<version> of the public packages (the gate fails if their versions
+        # disagree). Pushed with the job's GITHUB_TOKEN (persisted by actions/checkout). A
+        # failed push fails the job: a version on npm without its tag must not look green.
         run: |
           set -euo pipefail
-          VERSION=$(node -e "console.log(require('./packages/polytag/package.json').version)")
-          TAG="v${VERSION}"
+          TAG=$(node scripts/release-gate.mjs --tag)
           set +e
           git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null
           status=$?

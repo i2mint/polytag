@@ -25,9 +25,14 @@
  * the publish job's concurrency group keeps one pending run and cancels the older one, so
  * the intermediate version is never released (bump again, or publish it by hand, to keep it).
  *
- * Usage (CI):  node scripts/release-gate.mjs          -> writes publish=, force= to $GITHUB_OUTPUT
- *              node scripts/release-gate.mjs --list   -> prints name@version of each public package, one per line
- * API:         decideRelease, hasMarker, releaseWindowSubjects, isPublished, publicPackages, publicSpecs
+ * Usage (CI):  node scripts/release-gate.mjs           -> writes publish=, force= to $GITHUB_OUTPUT
+ *              node scripts/release-gate.mjs --list    -> name@version of each public package, one per line
+ *              node scripts/release-gate.mjs --tag     -> the release tag v<version> (versions must agree)
+ *              node scripts/release-gate.mjs --verify  -> waits until the registry serves every public version
+ * "Public package" means a non-private package of the pnpm workspace (`pnpm-workspace.yaml`),
+ * which is exactly what `pnpm -r publish` publishes.
+ * API:         decideRelease, hasMarker, releaseWindowSubjects, isPublished, publicPackages, publicSpecs,
+ *              releaseTag, verifyPublished, workspaceDirs, workspaceGlobs
  */
 
 import { execFileSync } from 'node:child_process';
@@ -133,17 +138,45 @@ export async function releaseWindowSubjects(
   return subjects;
 }
 
-/** Manifest paths (relative to `root`) of every package under `packages/`, private ones included. */
-export function packageManifests(root = ROOT) {
-  const dir = join(root, 'packages');
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .map((d) => join(dir, d, 'package.json'))
-    .filter(existsSync)
-    .map((p) => relative(root, p));
+/**
+ * The workspace's package directories, relative to `root`: the `packages:` globs of
+ * `pnpm-workspace.yaml` (what `pnpm -r publish` publishes), `packages/*` when there is none.
+ * Supported globs: `dir/*` (one level) and a plain `dir`; `!` exclusions apply. Anything else
+ * (`**`, character classes) throws, so a workspace this cannot read never shrinks the list silently.
+ */
+export function workspaceDirs(root = ROOT) {
+  const file = join(root, 'pnpm-workspace.yaml');
+  const globs = existsSync(file) ? workspaceGlobs(readFileSync(file, 'utf8')) : ['packages/*'];
+  const expand = (glob) => {
+    if (/[*?[\]{}]/.test(glob.replace(/\/\*$/, ''))) throw new Error(`pnpm-workspace.yaml: unsupported glob '${glob}' (use 'dir/*' or 'dir')`);
+    if (!glob.endsWith('/*')) return [glob];
+    const dir = join(root, glob.slice(0, -2));
+    return existsSync(dir) ? readdirSync(dir).map((d) => `${glob.slice(0, -2)}/${d}`) : [];
+  };
+  const excluded = new Set(globs.filter((g) => g.startsWith('!')).flatMap((g) => expand(g.slice(1))));
+  return globs.filter((g) => !g.startsWith('!')).flatMap(expand).filter((d) => !excluded.has(d));
 }
 
-/** Non-private packages under `packages/`, with their manifest path relative to `root`. */
+/** The `packages:` list of a pnpm-workspace.yaml (a flat list of quoted or bare strings). */
+export function workspaceGlobs(text) {
+  const globs = [];
+  let inPackages = false;
+  for (const line of text.split('\n')) {
+    if (/^\S/.test(line)) inPackages = /^packages:\s*$/.test(line);
+    const item = inPackages && line.match(/^\s+-\s*(['"]?)([^'"#]+?)\1\s*(#.*)?$/);
+    if (item) globs.push(item[2].trim());
+  }
+  return globs;
+}
+
+/** Manifest paths (relative to `root`) of every workspace package, private ones included. */
+export function packageManifests(root = ROOT) {
+  return workspaceDirs(root)
+    .map((d) => join(d, 'package.json'))
+    .filter((m) => existsSync(join(root, m)));
+}
+
+/** Non-private workspace packages, with their manifest path relative to `root`. */
 export function publicPackages(root = ROOT) {
   return packageManifests(root)
     .map((manifest) => ({ manifest, ...JSON.parse(readFileSync(join(root, manifest), 'utf8')) }))
@@ -154,6 +187,57 @@ export function publicPackages(root = ROOT) {
 /** `name@version` of each public package: what a publish releases, and what the registry must then serve. */
 export function publicSpecs(root = ROOT) {
   return publicPackages(root).map(({ name, version }) => `${name}@${version}`);
+}
+
+/** The release tag, `v<version>`: the public packages must agree on one version. */
+export function releaseTag(packages) {
+  const versions = [...new Set(packages.map((p) => p.version))];
+  if (versions.length !== 1) {
+    throw new Error(`cannot derive one release tag: public package versions are ${versions.join(', ') || '(no public package)'}`);
+  }
+  return `v${versions[0]}`;
+}
+
+/**
+ * Wait until the registry serves every package's version; throw if one never appears. A 404
+ * means "not visible yet" (a new name can lag for minutes); a registry error is retried too,
+ * and named in the failure, so an outage never reads as a failed publish without saying so.
+ *
+ * @param {{name: string, version: string}[]} packages
+ * @param {object} [options]
+ * @param {number} [options.attempts]
+ * @param {number} [options.intervalMs]
+ * @param {(ms: number) => Promise<void>} [options.sleep]
+ * @param {typeof isPublished} [options.isPublishedImpl]
+ * @param {(line: string) => void} [options.log]
+ */
+export async function verifyPublished(
+  packages,
+  {
+    attempts = 20,
+    intervalMs = 15_000,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    isPublishedImpl = isPublished,
+    log = console.log,
+  } = {},
+) {
+  if (packages.length === 0) throw new Error('no public package to verify');
+  for (const { name, version } of packages) {
+    const spec = `${name}@${version}`;
+    let last = 'not visible yet';
+    let confirmed = false;
+    for (let attempt = 1; attempt <= attempts && !confirmed; attempt++) {
+      try {
+        confirmed = await isPublishedImpl(name, version);
+        last = 'not visible yet';
+      } catch (err) {
+        last = `registry error: ${err.message}`;
+      }
+      log(confirmed ? `${spec} confirmed on the registry (attempt ${attempt})` : `${spec} ${last} (attempt ${attempt}/${attempts})`);
+      if (!confirmed && attempt < attempts) await sleep(intervalMs);
+    }
+    if (!confirmed) throw new Error(`${spec} never appeared on the registry (${last}): the publish failed`);
+  }
 }
 
 /**
@@ -182,6 +266,15 @@ async function main() {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  if (process.argv.includes('--list')) console.log(publicSpecs().join('\n'));
-  else await main();
+  const [mode] = process.argv.slice(2);
+  try {
+    if (mode === '--list') console.log(publicSpecs().join('\n'));
+    else if (mode === '--tag') console.log(releaseTag(publicPackages()));
+    else if (mode === '--verify') await verifyPublished(publicPackages());
+    else if (mode === undefined) await main();
+    else throw new Error(`unknown option ${mode} (expected --list, --tag or --verify)`);
+  } catch (err) {
+    console.error(`::error title=Release gate::${err.message}`); // stderr: `TAG=$(... --tag)` must not swallow it
+    process.exit(1);
+  }
 }

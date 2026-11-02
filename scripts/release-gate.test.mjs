@@ -4,7 +4,19 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { decideRelease, hasMarker, isPublished, publicPackages, publicSpecs, releaseWindowSubjects } from './release-gate.mjs';
+import {
+  decideRelease,
+  hasMarker,
+  isPublished,
+  packageManifests,
+  publicPackages,
+  publicSpecs,
+  releaseTag,
+  releaseWindowSubjects,
+  verifyPublished,
+  workspaceDirs,
+  workspaceGlobs,
+} from './release-gate.mjs';
 
 const unpublished = [{ name: 'polytag', version: '0.1.0', published: false }];
 const published = [{ name: 'polytag', version: '0.1.0', published: true }];
@@ -232,5 +244,101 @@ describe('publicSpecs and --list', () => {
       env: { PATH: '/nonexistent' }, // no git on PATH
     });
     expect(out).toBe(`polytag@${version}\n`);
+  });
+});
+
+describe('the workspace: what pnpm -r publish publishes', () => {
+  it('reads the packages: globs, quoted or bare, ignoring other keys and comments', () => {
+    const yaml = "packages:\n  - 'packages/*'\n  - \"apps/*\" # the apps\n  - tools\n  - '!apps/legacy'\nonlyBuiltDependencies:\n  - esbuild\n";
+    expect(workspaceGlobs(yaml)).toEqual(['packages/*', 'apps/*', 'tools', '!apps/legacy']);
+  });
+
+  const root = mkdtempSync(join(tmpdir(), 'polytag-ws-'));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  const pkg = (dir, fields) => {
+    mkdirSync(join(root, dir), { recursive: true });
+    writeFileSync(join(root, dir, 'package.json'), JSON.stringify(fields));
+  };
+  pkg('packages/a', { name: 'a', version: '1.0.0' });
+  pkg('apps/public-app', { name: 'public-app', version: '1.0.0' });
+  pkg('apps/legacy', { name: 'legacy', version: '0.1.0' });
+  pkg('apps/private-app', { name: 'private-app', version: '0.0.0', private: true });
+
+  it('expands dir/* and exclusions; finds a public package outside packages/ (review of #23)', () => {
+    writeFileSync(join(root, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n  - 'apps/*'\n  - '!apps/legacy'\n");
+    expect(workspaceDirs(root).sort()).toEqual(['apps/private-app', 'apps/public-app', 'packages/a']);
+    expect(publicSpecs(root).sort()).toEqual(['a@1.0.0', 'public-app@1.0.0']);
+  });
+
+  it('refuses a glob it cannot expand rather than shrinking the list', () => {
+    writeFileSync(join(root, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/**'\n");
+    expect(() => workspaceDirs(root)).toThrow(/unsupported glob 'packages\/\*\*'/);
+  });
+
+  it('falls back to packages/* without a workspace file', () => {
+    rmSync(join(root, 'pnpm-workspace.yaml'));
+    expect(workspaceDirs(root)).toEqual(['packages/a']);
+  });
+
+  it("this repo's manifests include the private playground (a private-flag change moves the window)", () => {
+    expect(packageManifests()).toContain(join('apps', 'playground', 'package.json'));
+  });
+});
+
+describe('releaseTag', () => {
+  it('is v<version> when the public packages agree', () => {
+    expect(releaseTag([{ name: 'a', version: '1.2.0' }, { name: 'b', version: '1.2.0' }])).toBe('v1.2.0');
+  });
+
+  it('throws when they disagree, or there is none', () => {
+    expect(() => releaseTag([{ name: 'a', version: '1.2.0' }, { name: 'b', version: '1.3.0' }])).toThrow(/1\.2\.0, 1\.3\.0/);
+    expect(() => releaseTag([])).toThrow(/no public package/);
+  });
+
+  it('--tag prints this repo\'s tag', () => {
+    const script = fileURLToPath(new URL('./release-gate.mjs', import.meta.url));
+    const { version } = JSON.parse(readFileSync(new URL('../packages/polytag/package.json', import.meta.url), 'utf8'));
+    expect(execFileSync(process.execPath, [script, '--tag'], { encoding: 'utf8' })).toBe(`v${version}\n`);
+  });
+});
+
+describe('verifyPublished', () => {
+  const pkgs = [{ name: 'a', version: '1.0.0' }];
+  const scripted = (...answers) => {
+    const calls = [];
+    return {
+      calls,
+      impl: async (name, version) => {
+        calls.push(`${name}@${version}`);
+        const a = answers.shift();
+        if (a instanceof Error) throw a;
+        return a;
+      },
+    };
+  };
+  const options = (impl, extra = {}) => {
+    const log = [];
+    const slept = [];
+    return { log, slept, opts: { attempts: 3, intervalMs: 7, sleep: async (ms) => void slept.push(ms), isPublishedImpl: impl, log: (l) => log.push(l), ...extra } };
+  };
+
+  it('returns once every version is served, waiting between attempts while it lags', async () => {
+    const { impl, calls } = scripted(false, true);
+    const { log, slept, opts } = options(impl);
+    await verifyPublished(pkgs, opts);
+    expect(calls).toEqual(['a@1.0.0', 'a@1.0.0']);
+    expect(slept).toEqual([7]);
+    expect(log.at(-1)).toBe('a@1.0.0 confirmed on the registry (attempt 2)');
+  });
+
+  it('retries a registry error and names it when the version never appears', async () => {
+    const { impl } = scripted(new Error('Registry answered 503'), false, new Error('Registry answered 503'));
+    const { slept, opts } = options(impl);
+    await expect(verifyPublished(pkgs, opts)).rejects.toThrow(/a@1\.0\.0 never appeared on the registry \(registry error: Registry answered 503\)/);
+    expect(slept).toEqual([7, 7]); // no sleep after the last attempt
+  });
+
+  it('fails closed on an empty list', async () => {
+    await expect(verifyPublished([], options(async () => true).opts)).rejects.toThrow(/no public package/);
   });
 });
