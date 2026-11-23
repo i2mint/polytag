@@ -76,6 +76,9 @@
     "dist"
   ],
   "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsup",
     "prepublishOnly": "pnpm build",
@@ -98,6 +101,7 @@
     "zod": "^4.6.5"
   },
   "dependencies": {
+    "holdall": "^0.1.0",
     "jsonc-parser": "^3.3.1",
     "papaparse": "^5.7.0",
     "smol-toml": "^1.9.0",

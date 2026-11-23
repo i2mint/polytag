@@ -33,7 +33,13 @@ const EXPECTED: Record<string, string[]> = {
     'tomlComments', 'tryDecode', 'tsv', 'yaml', 'yamlComments',
   ],
   './backends': ['createBackendCatalog'],
-  './views': ['createViewMenu'],
+  './views': [
+    'DEFAULT_INTERACTION', 'DEFAULT_VIEWS', 'FamilyRefSchema', 'FieldsConfigSchema', 'GAP_MESSAGES',
+    'InspectorConfigSchema', 'InteractionConfigSchema', 'LayoutConfigSchema', 'NavigatorConfigSchema',
+    'NavigatorSurfaceSchema', 'SavedViewSchema', 'ShellSchema', 'VIEW_ENVELOPE', 'VIEW_LINK_KEY',
+    'ViewConfigSchema', 'availableViews', 'createViewMenu', 'defaultViewMenu', 'isDirty',
+    'parseSavedView', 'parseViewConfig', 'viewFromLink', 'viewToLink',
+  ],
 };
 
 /** Names exported by `specifier`, loaded in a fresh Node process via package self-reference. */
