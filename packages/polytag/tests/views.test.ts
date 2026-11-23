@@ -60,11 +60,11 @@ describe('polytag/views: availableViews', () => {
     expect(items.map((i) => i.rank)).toEqual([...items.map((i) => i.rank)].sort((a, b) => a - b));
     const disabled = Object.fromEntries(items.filter((i) => !i.enabled).map((i) => [i.id, i.gaps.map((g) => g.code)]));
     expect(disabled).toEqual({
-      board: ['needs-exclusive-family'],
+      board: ['needs-family'],
       calendar: ['needs-date-role'],
       timeline: ['needs-start-role'],
     });
-    expect(items[0]).toMatchObject({ id: 'three-pane', enabled: true, repairs: '' });
+    expect(items[0]).toMatchObject({ id: 'three-pane', enabled: true, suggested: true, repairs: '' });
     // A disabled view has no config to apply; every enabled one validates.
     for (const item of items) {
       if (item.enabled) expect(() => parseViewConfig(item.config)).not.toThrow();
@@ -117,7 +117,7 @@ describe('polytag/views: SavedView and links', () => {
 
   it('round-trips through a URL fragment', () => {
     const link = viewToLink(saved, 'https://example.org/app');
-    expect(link.url.startsWith('https://example.org/app#view=')).toBe(true);
+    expect(link.url.startsWith('https://example.org/app#ptview=')).toBe(true);
     expect(link.tier).toBe('portable');
     expect(viewFromLink(link.url)).toEqual(saved);
   });
@@ -125,7 +125,8 @@ describe('polytag/views: SavedView and links', () => {
   it('reads null from a link without a view, and refuses a foreign or tampered payload', () => {
     expect(viewFromLink('https://example.org/app')).toBeNull();
     const link = viewToLink(saved, 'https://example.org/app');
-    expect(() => viewFromLink(link.url.replace(/view=[^&]*/, 'view=j1.e30'))).toThrow();
+    expect(() => viewFromLink(link.url.replace(/ptview=[^&]*/, 'ptview=j1.e30'))).toThrow();
+    expect(viewFromLink('https://example.org/app#view=grid')).toBeNull(); // an app's own param
   });
 
   it('refuses to encode anything beyond the view, so a secret never reaches a link', () => {
@@ -139,5 +140,48 @@ describe('polytag/views: SavedView and links', () => {
     const reordered = parseSavedView(JSON.parse(JSON.stringify({ sort: saved.sort, ...saved })));
     expect(isDirty(saved, reordered)).toBe(false);
     expect(isDirty(saved, { ...saved, sort: [{ field: 'title', direction: 'desc' }] })).toBe(true);
+  });
+});
+
+describe('polytag/views: review regressions', () => {
+  it('a board over a non-exclusive family is offered degraded, duplicating multi-tagged cards', () => {
+    const board = availableViews(DEFAULT_VIEWS, { families: [{ name: 'topic', exclusive: false }] }).find((i) => i.id === 'board')!;
+    expect(board.enabled).toBe(true);
+    expect(board.gaps).toEqual([{ code: 'needs-exclusive-family', blocking: false }]);
+    expect(board.config!.layout).toMatchObject({ groupBy: { family: 'topic' }, multiValue: 'duplicate' });
+  });
+
+  it('a timeline with a date but no end is offered degraded', () => {
+    const tl = availableViews(DEFAULT_VIEWS, { roles: { date: 'd' } }).find((i) => i.id === 'timeline')!;
+    expect(tl).toMatchObject({ enabled: true, gaps: [{ code: 'needs-end-role', blocking: false }] });
+  });
+
+  it('triage stays available but is not suggested when items are never tagged', () => {
+    const triage = (caps: { maxGroupsPerItem?: number | null }) => availableViews(DEFAULT_VIEWS, caps).find((i) => i.id === 'triage')!;
+    expect(triage({ maxGroupsPerItem: 0 })).toMatchObject({ enabled: true, suggested: false });
+    expect(triage({ maxGroupsPerItem: null })).toMatchObject({ enabled: true, suggested: true });
+  });
+
+  it('greys out an entry whose config does not validate or that throws, instead of breaking the menu', () => {
+    const board = availableViews(DEFAULT_VIEWS, { families: [{ name: '', exclusive: true }] }).find((i) => i.id === 'board')!;
+    expect(board).toMatchObject({ enabled: false, gaps: [{ code: 'invalid-config', blocking: true }] });
+    const boom = { id: 'boom', rank: 0, label: 'x', repairs: 'x', gaps: () => { throw new Error('no'); }, config: () => { throw new Error('no'); } };
+    expect(availableViews([boom], {})[0]).toMatchObject({ enabled: false, gaps: [{ code: 'invalid-config', blocking: true }] });
+  });
+
+  it('hands out configs that can be edited, and default entries that cannot', () => {
+    const [first] = availableViews(DEFAULT_VIEWS, {});
+    first!.config!.interaction.tagCommit = 'staged';
+    expect(DEFAULT_INTERACTION.tagCommit).toBe('immediate');
+    expect(() => {
+      (DEFAULT_VIEWS[0] as { rank: number }).rank = 99;
+    }).toThrow();
+  });
+
+  it('always puts a view in the fragment, never the query string', () => {
+    const saved = { name: 'v', viewConfig: availableViews(DEFAULT_VIEWS, {})[0]!.config! };
+    const link = viewToLink(saved, 'https://example.org/app', { part: 'search' } as never);
+    expect(new URL(link.url).search).toBe('');
+    expect(viewFromLink(link.url)).toEqual(saved);
   });
 });

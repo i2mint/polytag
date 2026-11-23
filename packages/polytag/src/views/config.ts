@@ -9,7 +9,9 @@
  * state is a {@link SavedView}.
  *
  * Every schema is strict: an unknown key is an error, not a silently kept extra, so nothing
- * that is not part of the lens (a token, a local id) can ride along into a share link.
+ * that is not part of the lens (a token, a local id) can ride along into a share link. The
+ * one opaque part is a saved view's `filter` (any JSON until zodal publishes a schema for its
+ * filter expressions): what a filter holds goes into the link as it is.
  *
  * Tag-agnostic: families and navigator surfaces are named by string here; resolving them
  * against a group space is the tag-aware root's job.
@@ -23,11 +25,12 @@ export const ShellSchema = z.enum(['single', 'two-pane', 'three-pane']);
 export type Shell = z.infer<typeof ShellSchema>;
 
 /**
- * Slot 2: how the user picks a group scope. `auto` lets the app choose the navigator for the
- * space's profile (groups-ui's `(surface, profile)` scores: filesystem -> tree,
- * polyhierarchy/thesaurus -> columns, flat tags -> facets or list).
+ * Slot 2: how the user picks a group scope: `auto`, or one of `@zodal/groups-ui`'s navigator
+ * surfaces (`tree`, `columns` for Miller columns, `facets`, `groupChips` for the phone
+ * browser). `auto` lets the app choose by the space's profile (groups-ui's `(surface,
+ * profile)` scores: filesystem -> tree, polyhierarchy/thesaurus -> columns, flat tags -> facets).
  */
-export const NavigatorSurfaceSchema = z.enum(['auto', 'tree', 'columns', 'facets', 'list', 'cloud']);
+export const NavigatorSurfaceSchema = z.enum(['auto', 'tree', 'columns', 'facets', 'groupChips']);
 export type NavigatorSurface = z.infer<typeof NavigatorSurfaceSchema>;
 
 export const NavigatorConfigSchema = z.strictObject({ surface: NavigatorSurfaceSchema });
@@ -109,7 +112,8 @@ export type ViewConfig = z.infer<typeof ViewConfigSchema>;
  * compares the live state with the snapshot (see {@link isDirty}) and offers to save.
  *
  * `filter` is the collection's filter expression (zodal core's), kept opaque here; it must be
- * plain JSON data.
+ * plain JSON data. `group` groups the items of a list or table layout; a board's columns come
+ * from its own `layout.groupBy`, which wins for that layout.
  */
 export const SavedViewSchema = z.strictObject({
   name: z.string().min(1),
